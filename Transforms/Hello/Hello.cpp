@@ -46,10 +46,10 @@ using namespace llvm;
 #define FOR(i,x,y) for(int i=x; i<=y; i++)
 #define FORN(i,n) FOR(i,0,(n-1))
 #define FORE(it,v) for(__typeof(v.begin()) it = v.begin(); it != v.end(); it++)
-#define db(x) cout << (#x) << " = " << x << endl;
+#define db(x) errs() << (#x) << " = " << x << "\n";
 #define CLR(x) memset(x,0,sizeof(x));
 #define sz(x) ((int)x.size())
-#define mp make_pair
+#define mp std::make_pair
 #define pb push_back
 #define re return
 typedef unsigned long long ull;
@@ -513,11 +513,11 @@ namespace
 
         }
 
-        Value * mapValue(Value * value, ValueDuplicateMap & map)
+        std::pair<Value *, bool>  mapValue(Value * value, ValueDuplicateMap & map)
         {
             Value * direct_match = map.lookup(value);
             if (direct_match)
-                return direct_match;
+                return mp(direct_match, true);
 
             Constant * constant = dyn_cast<Constant>(value);
             if (constant)
@@ -526,55 +526,82 @@ namespace
                 std::vector<Constant *> operands;
                 for each_custom(operand, *constant, op_begin, op_end)
                 {
-                    operands.push_back(cast<Constant>(mapValue(*operand, map)));
+                    operands.push_back(cast<Constant>(mapValue(*operand, map).first));
                 }
                 ConstantExpr * constant_expr = dyn_cast<ConstantExpr>(constant);
                 if (constant_expr)
                 {
-                    return constant_expr->getWithOperands(operands, type);
+                    return mp(constant_expr->getWithOperands(operands, type), true);
                 }
                 else if (isa<ConstantArray>(constant))
                 {
-                    return ConstantArray::get(cast<ArrayType>(type), operands);
+                    return mp(ConstantArray::get(cast<ArrayType>(type), operands), true);
                 }
                 else if (isa<ConstantStruct>(constant))
                 {
-                    return ConstantStruct::get(cast<StructType>(type), operands);
+                    return mp(ConstantStruct::get(cast<StructType>(type), operands), true);
                 }
                 else if (isa<ConstantVector>(constant))
                 {
-                    return ConstantVector::get(operands);
+                    return mp(ConstantVector::get(operands), true);
                 }
                 else
                 {
-                    return constant;
+                    return mp(constant, true);
                 }
             }
+            // Instruction * instruction = dyn_cast<Instruction>(value);
+            // if(instruction)
+            // {
+            // 	instruction->dump();
+            // 	Instruction *NI = instruction->clone();
+            // 	map[instruction] = NI;
+            // 	mapOperands(NI, map);
+            // 	return NI;
+            // }
             // value->dump();
             // errs()<<"The above operand does not have a replacement?\n";
-            return value;
+            return mp(value, false);
         }
         bool isCloneable(Instruction *inst)
         {
         	bool success = true;
             success &= !isa<TerminatorInst>(inst);
+            // success &= !isa<PHINode>(inst);
             CallInst *call = dyn_cast<CallInst>(inst);
             success &= !call || (call && (call->isInlineAsm() || call->getCalledFunction()->getName() == "printf"));
             return success;
         }
-        bool isCallable(Instruction *inst)
+        bool isPhi(Instruction *inst)
         {
-            return !isa<CallInst>(inst);
+        	bool success = true;
+            success &= isa<PHINode>(inst);
+            return success;
+        }
+        bool isCallable(Value *inst)
+        {
+        	CallInst *call = dyn_cast<CallInst>(inst);
+        	if(call)
+            	return true;
+            return false;
         }
         bool isAllocable(Instruction *inst)
         {
             return isa<AllocaInst>(inst);
         }
-        void mapOperands(Instruction *instr, ValueDuplicateMap & map)
+        void mapOperands(Instruction *instr, ValueDuplicateMap & map, std::vector<std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             for each_custom(operand, *instr, op_begin, op_end)
             {
-                *operand = mapValue(*operand, map);
+            	std::pair<Value *, bool> t = mapValue(*operand, map);
+                *operand = t.first;
+                if(!t.second && !isCallable(*operand))
+                {
+                	Value *temp  = *operand;
+                	std::pair<Instruction *, Value *> V = mp(instr, temp);
+                	toBeReplaced.pb(V);
+                	// db("PUSHED");
+                }
             }
         }
         void printInstruction(Instruction *I)
@@ -629,7 +656,7 @@ namespace
             {
                 Value * arg = call->getArgOperand(index);
                 args.push_back(arg);
-                args.push_back(mapValue(arg, map));
+                args.push_back(mapValue(arg, map).first);
             }
             Function * function = call->getCalledFunction();
             CallInst * new_call = CallInst::Create(function, args, "", call);
@@ -648,7 +675,7 @@ namespace
         void muxReturnInst(ReturnInst * ret, ValueDuplicateMap & map)
         {
 			Value *value = ret->getReturnValue();
-			Value *value_dup = mapValue(value, map);
+			Value *value_dup = mapValue(value, map).first;
 			std::vector< Value * > V;
 			std::vector< Type * > Elements;
 			V.push_back(value);
@@ -664,7 +691,18 @@ namespace
 			
 			ret->setOperand(0, str);
         }
-        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited)
+        bool remapOperand(Instruction *instr, Value *old_value, Value *new_value)
+        {
+        	for each_custom(operand, *instr, op_begin, op_end)
+				if(*operand == old_value)
+				{
+	    			*operand = new_value;
+	    			return true;
+	    		}
+    		return false;
+        }
+        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited, 
+        	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             // errs()<<bb->getName()<<"\n";
     		if(visited[bb])
@@ -677,45 +715,74 @@ namespace
             std::vector<CallInst *> toBeRemoved;
             std::vector<CmpInst *> createdCheckInsts;
             bool previous = false;
+            int skip = 0;
             FORE(iter, (*bb))
             {
                 // iter->dump();
-                if(previous)
-                {
-                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
-                    createdCheckInsts.pb(cmp);
-                    previous = false;
-                }
-                CallInst *call = dyn_cast<CallInst>(iter);
-                if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
-                {
-                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
-                    modifyCallInstruction(call, map, toBeRemoved);
-                }
-                else
-                if(isCloneable(iter))
-                {
-                	if(call && !call->isInlineAsm())
-                	{
-                		// errs()<<call->getCalledFunction()->getName()<<"\n";
-                		// errs()<<call->doesNotThrow()<<"\n";
-                	}
-                    I = iter;
-                    NI = I->clone();
-                    mapOperands(NI, map);
-                    map[I] = NI;
-                    if(I->hasName())
-                        NI->setName(makeName(I, "_dup"));
-                    NI->insertBefore(I);
-                    if(I->mayReturn() && hasOutput(I))
-                        previous = true;
-                }
-            }
+                // if(dontClone)
+                // {
+                // 	Instruction *inst = iter;
+                // 	CallInst *call = dyn_cast<CallInst>(iter);
+	               //  if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
+	               //  	continue;
+	               //  if(inst->hasName() && (inst->getName().endswith("_dup") || inst->getName().endswith("_check")))
+		              //   if(isCloneable(inst))
+	            			// mapOperands(inst, map);
+                // }
+                // else
+                // {
+	                if(skip)
+	                {
+	                	skip --;
+	                	continue;
+	                }
+	                if(previous)
+	                {
+	                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
+	                    createdCheckInsts.pb(cmp);
+	                    previous = false;
+	                }
+	                CallInst *call = dyn_cast<CallInst>(iter);
+	                if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
+	                {
+	                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
+	                    modifyCallInstruction(call, map, toBeRemoved);
+	                }
+	                else
+	                if(isCloneable(iter))
+	                {
+	                	// iter->dump();
+	                    I = iter;
+	                    NI = I->clone();
+	                    mapOperands(NI, map, toBeReplaced);
+	                    map[I] = NI;
+	                    if(I->hasName())
+	                    	NI->setName(makeName(I, "_dup"));
+	                    NI->insertAfter(I);
+	                    skip++;
+	                    if(I->mayReturn() && hasOutput(I) && !isPhi(I))
+	                        previous = true;
+	                }
+	                // else
+	                // if(isPhi(iter))
+	                // {
+	                // 	skip++;
+	                // 	I = iter;
+	                // 	NI = I->clone();
+	                // 	mapOperands(NI, map);
+	                // 	map[I] = NI;
+	                // 	if(I->hasName())
+	                //         NI->setName(makeName(I, "_dup"));
+	                //     NI->insertAfter(I);
+	                // }
+	            
+	        }
             FORN(i, sz(toBeRemoved))
             {
                 CallInst *temp = toBeRemoved[i];
                 temp->eraseFromParent();
             }
+            // db(sz(toBeReplaced));
             
    //          int pos = 0;
    //          previous = false;
@@ -772,26 +839,49 @@ namespace
 			// if(pos!=sz(createdCheckInsts))	errs()<<"THere definitely is an error here\n";
 			// // errs()<<bb->getName()<<" We did not come here2\n";
         }
-        void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited)
+        void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited, 
+        	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
-            cloneBasicBlock(root->getBlock(), function, M, map, visited);
+            cloneBasicBlock(root->getBlock(), function, M, map, visited, toBeReplaced);
             for each(child, *root)
-                cloneBlockTree(*child, function, M, map, visited);
+                cloneBlockTree(*child, function, M, map, visited, toBeReplaced);
         }
         void printName(Value *v)
         {
             errs()<<v->getName()<<"\n";
         }
-        void cloneFunction(Function *F, ValueDuplicateMap & map, Module &M)
+        void cloneFunction(Function *F, ValueDuplicateMap & global_map, Module &M)
         {
-            printName(F);
+            // printName(F);
             std::	map<BasicBlock *, bool> visited;
+
+            std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
+            toBeReplaced.clear();
+
             DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
-            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, visited);
+            ValueDuplicateMap map;
+        	map.insert(global_map.begin(), global_map.end());
+            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, visited, toBeReplaced);
+
+            FORN(i,sz(toBeReplaced))
+            {
+            	std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
+            	if(t.second)
+            	{
+            		// toBeReplaced[i].second->dump();
+            		// t.first->dump();
+            		if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
+            			db("Error on Replacing");
+            	}
+            	// else
+            	// 	t.first->dump();
+            }
+            // visited.clear();
+            // db("Second Pass");
+            // cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, visited, true);
                 
             if (prototypeNeedsToBeModified(F))
             {
-            	// errs()<<F->getName()<<"was modified\n";
                 FORE(iter, (*F))
                 {
                     ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
@@ -815,7 +905,6 @@ namespace
 			FORE(iter, M)
 				if (!((*iter).isDeclaration()))
 					cloneFunction(iter, map, M);
-			// errs()<<"We got here";
 			return true;
         }
 		void getAnalysisUsage(AnalysisUsage & info) const
