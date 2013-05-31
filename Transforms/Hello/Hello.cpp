@@ -62,15 +62,6 @@ typedef ValueToValueMapTy ValueDuplicateMap;
 #define each(item, set) each_custom(item, set, begin, end)
 namespace
 {
-//     static unsigned NumRetVals(const Function *F)
-//     {
-//         if (F->getReturnType()->isVoidTy())
-//         return 0;
-//         else if (StructType *STy = dyn_cast<StructType>(F->getReturnType()))
-//         return STy->getNumElements();
-//         else
-//         return 1;
-//     }
     struct QED : public ModulePass
     {
         public:
@@ -86,314 +77,6 @@ namespace
 	    ConstantInt * i32_zero;
 	    int currentBasicBlock;
 	    GlobalVariable *cftss_id;
-//         void modifyPrototype(Function *F)
-//         {
-//             // Start by computing a new prototype for the function, which is the same as
-//             // the old function, but has 2X more arguments and a 2X return type.
-//             FunctionType *FTy = F->getFunctionType();
-//             std::vector<Type*> Params;
-// 
-//             // Set up to build a new list of parameter attributes.
-//             SmallVector<AttributeSet, 8> AttributesVec;
-//             const AttributeSet &PAL = F->getAttributes();
-//             
-//             // Find out the new return value.
-//             Type *RetTy = FTy->getReturnType();
-//             Type *NRetTy = NULL;
-//             unsigned RetCount = NumRetVals(F);
-// 
-//             std::vector<Type*> RetTypes;
-//             
-//             //If return is type void, then we don't have to do much for QED
-//             if (RetTy->isVoidTy())
-//             {
-//                 NRetTy = RetTy;
-//             }
-//             else
-//             {
-//                 StructType *STy = dyn_cast<StructType>(RetTy);
-//                 // Look at each of the original return values individually.
-//                 // This is the case for multiple return values
-//                 if (STy)
-//                 {
-//                     FORN(i, RetCount)
-//                     {
-//                         RetTypes.push_back(STy->getElementType(i));
-//                         RetTypes.push_back(STy->getElementType(i));
-//                     }
-//                 }
-//                 // We used to return a single value.
-//                 else
-//                 {
-//                     RetTypes.push_back(RetTy);
-//                     RetTypes.push_back(RetTy);
-//                 }
-//                 // More than one return type? Return a struct with them. Also, if we used
-//                 // to return a struct and didn't change the number of return values,
-//                 // return a struct again. This prevents changing {something} into
-//                 // something and {} into void.
-//                 // Make the new struct packed if we used to return a packed struct
-//                 // already.
-//                 if (RetTypes.size() > 1)
-//                     NRetTy = StructType::get(STy->getContext(), RetTypes, false);
-//                 else
-//                     NRetTy = Type::getVoidTy(F->getContext());
-//                 
-//                 assert(NRetTy && "No new return type found?");
-//             }
-//             
-//             // The existing function return attributes.
-//             AttributeSet RAttrs = PAL.getRetAttributes();
-//             
-//             //Add the return attributes to the new attributes set
-//             if (RAttrs.hasAttributes(AttributeSet::ReturnIndex))
-//                 AttributesVec.push_back(AttributeSet::get(NRetTy->getContext(), RAttrs));
-//                 
-//                 
-//             // Construct the new parameter list from non-dead arguments. Also construct
-//             // a new set of parameter attributes to correspond. Skip the first parameter
-//             // attribute, since that belongs to the return value.
-//             unsigned i = 0;
-//             for (Function::arg_iterator I = F->arg_begin(), E = F->arg_end();
-//             I != E; ++I, ++i)
-//             {
-//                 Params.push_back(I->getType());
-//                 Params.push_back(I->getType());
-// 
-//                 // Get the original parameter attributes (skipping the first one, that is
-//                 // for the return value.
-//                 // Push the attributes twice to reflect the fact that the
-//                 // arguments have been duplicated.
-//                 if (PAL.hasAttributes(i + 1))
-//                 {
-//                     AttrBuilder B(PAL, i + 1);
-//                     AttrBuilder B(PAL, i + 1);
-//                     AttributesVec.
-//                     push_back(AttributeSet::get(F->getContext(), Params.size(), B));
-//                     AttributesVec.
-//                     push_back(AttributeSet::get(F->getContext(), Params.size(), B));
-//                 }
-//             }
-// 
-//             //Push the Function attributes
-//             if (PAL.hasAttributes(AttributeSet::FunctionIndex))
-//                 AttributesVec.push_back(AttributeSet::get(F->getContext(),
-//                                           PAL.getFnAttributes()));
-// 
-//             // Reconstruct the AttributesList based on the vector we constructed.
-//             AttributeSet NewPAL = AttributeSet::get(F->getContext(), AttributesVec);
-// 
-//             // Create the new function type based on the recomputed parameters.
-//             FunctionType *NFTy = FunctionType::get(NRetTy, Params, FTy->isVarArg());
-//             
-//             // Create the new function body and insert it into the module...
-//             Function *NF = Function::Create(NFTy, F->getLinkage());
-//             NF->copyAttributesFrom(F);
-//             NF->setAttributes(NewPAL);
-//             
-//             // Insert the new function before the old function, so we won't be processing
-//             // it again.
-//             F->getParent()->getFunctionList().insert(F, NF);
-//             NF->takeName(F);
-//             
-//             
-//             
-//             // Loop over all of the callers of the function, transforming the call sites
-//             // to pass in a 2X more arguments into the new function.
-//             std::vector<Value*> Args;
-//             while (!F->use_empty())
-//             {
-//                 CallSite CS(F->use_back());
-//                 Instruction *Call = CS.getInstruction();
-// 
-//                 AttributesVec.clear();
-//                 const AttributeSet &CallPAL = CS.getAttributes();
-// 
-//                 // The call return attributes.
-//                 AttributeSet RAttrs = CallPAL.getRetAttributes();
-// 
-//                 // Add the return attributes to the AttributesVec
-//                 if (RAttrs.hasAttributes(AttributeSet::ReturnIndex))
-//                   AttributesVec.push_back(AttributeSet::get(NF->getContext(), RAttrs));
-// 
-//                 // Declare these outside of the loops, so we can reuse them for the second
-//                 // loop, which loops the varargs.
-//                 CallSite::arg_iterator I = CS.arg_begin();
-//                 unsigned i = 0;
-//                 // Loop over those operands, corresponding to the normal arguments to the
-//                 // original function, and add those that are still alive.
-//                 for (unsigned e = FTy->getNumParams(); i != e; ++I, ++i)
-//                 {
-//                     Args.push_back(*I);
-//                     Argument *arg_dup = new Argument((*I)->getType(), makeName(*I, "_dup"));
-//                     
-//                     //this is the QED argument
-//                     Args.push_back(arg_dup);
-//                     
-//                     // Get original parameter attributes, and add them twice
-//                     // but skip return attributes.
-//                     if (CallPAL.hasAttributes(i + 1))
-//                     {
-//                         AttrBuilder B(CallPAL, i + 1);
-//                         AttributesVec.
-//                         push_back(AttributeSet::get(F->getContext(), Args.size(), B));
-//                         AttributesVec.
-//                         push_back(AttributeSet::get(F->getContext(), Args.size(), B));
-//                     }
-//                 }
-// 
-//                 //TODO Not sure if this needs to be added?
-//                 //Would it be possible to have QED arguments even in case of a dynamic
-//                 //call sites?
-//                 // Push any varargs arguments on the list. Don't forget their attributes.
-//                 for (CallSite::arg_iterator E = CS.arg_end(); I != E; ++I, ++i)
-//                 {
-//                     Args.push_back(*I);
-//                     if (CallPAL.hasAttributes(i + 1))
-//                     {
-//                         AttrBuilder B(CallPAL, i + 1);
-//                         AttributesVec.
-//                           push_back(AttributeSet::get(F->getContext(), Args.size(), B));
-//                     }
-//                 }
-// 
-//                 if (CallPAL.hasAttributes(AttributeSet::FunctionIndex))
-//                     AttributesVec.push_back(AttributeSet::get(Call->getContext(),
-//                                                     CallPAL.getFnAttributes()));
-// 
-//                 // Reconstruct the AttributesList based on the vector we constructed.
-//                 AttributeSet NewCallPAL = AttributeSet::get(F->getContext(), AttributesVec);
-// 
-//                 Instruction *New;
-//                 if (InvokeInst *II = dyn_cast<InvokeInst>(Call))
-//                 {
-//                     New = InvokeInst::Create(NF, II->getNormalDest(), II->getUnwindDest(),
-//                                            Args, "", Call);
-//                     cast<InvokeInst>(New)->setCallingConv(CS.getCallingConv());
-//                     cast<InvokeInst>(New)->setAttributes(NewCallPAL);
-//                 }
-//                 else
-//                 {
-//                     New = CallInst::Create(NF, Args, "", Call);
-//                     cast<CallInst>(New)->setCallingConv(CS.getCallingConv());
-//                     cast<CallInst>(New)->setAttributes(NewCallPAL);
-//                     if (cast<CallInst>(Call)->isTailCall())
-//                         cast<CallInst>(New)->setTailCall();
-//                 }
-//                 New->setDebugLoc(Call->getDebugLoc());
-// 
-//                 Args.clear();
-// 
-//                 if (!Call->use_empty())
-//                 {
-//                     if (New->getType() == Call->getType())
-//                     {
-//                         // Return type not changed? Just replace users then.
-//                         // This means this is a void type
-//                         Call->replaceAllUsesWith(New);
-//                         New->takeName(Call);
-//                     } 
-//                     else
-//                     {
-//                         assert(NRetTy->isStructTy() && "Return type is a struct");
-//                         Instruction *InsertPt = Call;
-//                         if (InvokeInst *II = dyn_cast<InvokeInst>(Call))
-//                         {
-//                             BasicBlock::iterator IP = II->getNormalDest()->begin();
-//                             while (isa<PHINode>(IP)) ++IP;
-//                             InsertPt = IP;
-//                         }
-// 
-//                         // We used to return a struct. Instead of doing smart stuff with all the
-//                         // uses of this struct, we will just rebuild it using
-//                         // extract/insertvalue chaining and let instcombine clean that up.
-//                         //
-//                         // Start out building up our return value from undef
-//                         Value *RetVal = UndefValue::get(RetTy);
-//                         FORN(i, RetCount)
-//                         {
-//                             Value *V;
-//                             V = ExtractValueInst::Create(New, i, "newret", InsertPt);
-//                             
-//                            // Insert the value at the old position
-//                             RetVal = InsertValueInst::Create(RetVal, V, i, "oldret", InsertPt);
-//                         }
-//                         // Now, replace all uses of the old call instruction with the return
-//                         // struct we built
-//                         Call->replaceAllUsesWith(RetVal);
-//                         New->takeName(Call);
-//                     }
-//                 }
-//                 // Finally, remove the old call from the program, reducing the use-count of
-//                 // F.
-//                 Call->eraseFromParent();
-//             }
-//             
-//             
-//             // Since we have now created the new function, splice the body of the old
-//             // function right into the new function, leaving the old rotting hulk of the
-//             // function empty.
-//             NF->getBasicBlockList().splice(NF->begin(), F->getBasicBlockList());
-// 
-//             // Loop over the argument list, transferring uses of the old arguments over to
-//             // the new arguments, also transferring over the names as well.
-//             i = 0;
-//             for (Function::arg_iterator I = F->arg_begin(), E = F->arg_end(),
-//                I2 = NF->arg_begin(); I != E; ++I, ++i)
-//             {
-//                 // If this is a live argument, move the name and users over to the new
-//                 // version.
-//                 I->replaceAllUsesWith(I2);
-//                 I2->takeName(I);
-//                 
-//                 //Append by two as the next argument is the duplicate argument
-//                 ++I2;
-//                 ++I2;
-//             }
-//             // If we change the return value of the function we must rewrite any return
-//             // instructions.  Check this now.
-//             for (Function::iterator BB = NF->begin(), E = NF->end(); BB != E; ++BB)
-//                 if (ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator()))
-//                 {
-//                     Value *RetVal;
-//                     if (NFTy->getReturnType()->isVoidTy())
-//                     {
-//                       RetVal = 0;
-//                     }
-//                     else
-//                     {
-//                         // assert (RetTy->isStructTy());
-//                         // The original return value was a struct, insert
-//                         // extractvalue/insertvalue chains to extract only the values we need
-//                         // to return and insert them into our new result.
-//                         // This does generate messy code, but we'll let it to instcombine to
-//                         // clean that up.
-//                         
-//                         Value *OldRet = RI->getOperand(0);
-//                         // Start out building up our return value from undef
-//                         RetVal = UndefValue::get(NRetTy);
-//                         FORN(i, RetCount)
-//                         {
-//                             ExtractValueInst *EV = ExtractValueInst::Create(OldRet, i,
-//                                                                           "oldret", RI);
-//                             RetVal = InsertValueInst::Create(RetVal, EV, i,
-//                                                              "newret", RI);
-//                         }
-//                 }
-//                 // Replace the return instruction with one returning the new return
-//                 // value (possibly 0 if we became void).
-//                 ReturnInst::Create(F->getContext(), RetVal, RI);
-//                 BB->getInstList().erase(RI);
-//             }
-// 
-//             // Patch the pointer to LLVM function in debug info descriptor.
-// //             FunctionDIMap::iterator DI = FunctionDIs.find(F);
-// //             if (DI != FunctionDIs.end())
-// //                 DI->second.replaceFunction(NF);
-// 
-//             // Now that the old function is dead, delete it.
-//             F->eraseFromParent();
-//         }
         QED() : ModulePass(ID), context(getGlobalContext())
         {
             one = ConstantInt::get(Type::getInt32Ty(context),1);
@@ -748,7 +431,6 @@ namespace
         {
             // errs()<<bb->getName()<<"\n";
             std::string bbname = bb->getName();
-            // int currentSplit = 0;
     		if(visited[bb])
     		{
     			errs()<<"this block has been visited before it seems?";
@@ -820,65 +502,11 @@ namespace
             	Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
             	// Function * exit_func = getExternalFunction("exit", exit_type, module);
             	// assert(exit_func);
-            	// CallInst::Create(checkFunction, error, "", bb->getTerminator());
+            	CallInst::Create(checkFunction, error, "", bb->getTerminator());
             }
             Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), currentBasicBlock++, false);
     		new StoreInst (tobestoredval, cftss_id, bb->getFirstInsertionPt());
             
-   //          int pos = 0;
-   //          previous = false;
-   //          BasicBlock::iterator iter;
-			// BasicBlock *current = bb;
-			// BasicBlock::iterator terminator = current->end();
-			// Value *condition = NULL;
-   //          // errs()<<bb->getName()<<" We did not come here\n";
-			// for(iter = current->begin();iter!=terminator;)
-			// {
-   //              assert(iter && "This cannot be null");
-			// 	if(previous)
-			// 	{
-			// 		assert((condition!=NULL) && "Condition Value not set");
-			// 		// condition->dump();
-   //                  // errs()<<"Are we here1?\n";
-   //                  // std::string temp = makeName(current, "_s");
-   //                  // errs()<<"Are we here2?\n";
-			// 		BasicBlock *newlycreated = bb->splitBasicBlock	(iter, "");
-   //                  // errs()<<"Are we here3?\n";
-					
-			// 		BasicBlock *fall_back = BasicBlock::Create(context, "", F, newlycreated);
-			// 		createExitCall(one, fall_back, M);
-			// 		BranchInst *branchinst = BranchInst::Create(newlycreated, fall_back, condition, bb->getTerminator());
-			// 		branchinst = BranchInst::Create(newlycreated, fall_back);
-			// 		// branchinst = dyn_cast<BranchInst>(bb->getTerminator());
-			// 		bb->getTerminator()->eraseFromParent();
-					
-					
-			// 		visited[newlycreated] = true;
-			// 		visited[fall_back] = true;
-					
-			// 		//Update the parameters after the basic block got created
-			// 		iter = newlycreated->begin();
-
-			// 		terminator = newlycreated->end();
-			// 		current = newlycreated;
-   //                  // errs()<<current->getName()<<"\n";
-					
-			// 		condition = NULL;
-			// 		previous = false;
-			// 		continue;
-			// 	}
-			// 	if(pos >= sz(createdCheckInsts))	break;
-			// 	if(pos < sz(createdCheckInsts) && iter->isIdenticalTo(createdCheckInsts[pos]))
-			// 	{
-			// 		pos++;
-			// 		condition = iter;
-			// 		errs()<<condition->getName()<<"\n";
-			// 		previous = true;
-			// 	}
-   //              iter++;
-			// }
-			// if(pos!=sz(createdCheckInsts))	errs()<<"THere definitely is an error here\n";
-			// errs()<<bb->getName()<<" We did not come here2\n";
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited, 
         	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
@@ -989,18 +617,18 @@ namespace
         	Argument *check_value = &checkFunction->getArgumentList().front();
         	
         	BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", checkFunction);
-        	BasicBlock* bb3 = llvm::BasicBlock::Create(context, "return_block", checkFunction);
-        	BasicBlock* bb2 = llvm::BasicBlock::Create(context, "exit_block", checkFunction);
-        	// IRBuilder<> Builder(Entry);
+        	BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", checkFunction);
+        	BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", checkFunction);
         	std::vector<Value *> v;
-        	// s
-        	v.pb(cftss_id);
-        	createPrintfCall("printfresult", "This was the CFTSSID was = %d\n", v, bb2, &module);
-        	createExitCall(one, bb2, &module);
-        	BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
-        	branchinst = BranchInst::Create(bb3, bb2);
 
-        	llvm::ReturnInst::Create(context, 0, bb3);
+            Instruction *loadres = new LoadInst(cftss_id, "", bb3);
+        	v.pb(loadres);
+        	createPrintfCall("printfresult", "The last basic block that got executed was = %d\n", v, bb3, &module);
+        	createExitCall(one, bb3, &module);
+        	BranchInst *branchinst = BranchInst::Create(bb2, bb3, check_value, bb1);
+        	branchinst = BranchInst::Create(bb2, bb3);
+
+        	llvm::ReturnInst::Create(context, 0, bb2);
 
 
         }
@@ -1031,48 +659,3 @@ namespace
 char QED::ID = 0;
 static RegisterPass<QED> X("hello", "Hello World Pass");
 
-// STATISTIC(HelloCounter, "Counts number of functions greeted");
-// 
-// namespace {
-//   // Hello - The first implementation, without getAnalysisUsage.
-//   struct Hello : public FunctionPass {
-//     static char ID; // Pass identification, replacement for typeid
-//     Hello() : FunctionPass(ID) {}
-// 
-//     virtual bool runOnFunction(Function &F) {
-//       ++HelloCounter;
-//       errs() << "Hello: ";
-//       errs().write_escaped(F.getName()) << '\n';
-//       AttributeSet a=F.getAttributes();
-//       a.dump();
-//       return false;
-//     }
-//   };
-// }
-// 
-// char Hello::ID = 0;
-// static RegisterPass<Hello> X("hello", "Hello World Pass");
-// 
-// namespace {
-//   // Hello2 - The second implementation with getAnalysisUsage implemented.
-//   struct Hello2 : public FunctionPass {
-//     static char ID; // Pass identification, replacement for typeid
-//     Hello2() : FunctionPass(ID) {}
-// 
-//     virtual bool runOnFunction(Function &F) {
-//       ++HelloCounter;
-//       errs() << "Hello: ";
-//       errs().write_escaped(F.getName()) << '\n';
-//       return false;
-//     }
-// 
-//     // We don't modify the program, so we preserve all analyses
-//     virtual void getAnalysisUsage(AnalysisUsage &AU) const {
-//       AU.setPreservesAll();
-//     }
-//   };
-// }
-// 
-// char Hello2::ID = 0;
-// static RegisterPass<Hello2>
-// Y("hello2", "Hello World Pass (with getAnalysisUsage implemented)");
