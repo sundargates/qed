@@ -60,6 +60,32 @@ typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
+
+enum QEDLevel
+{
+    EDDI,
+    CFTSS,
+    CFCSS,
+    ALL
+};
+
+// Some Command Line Arguments will be parsed here
+static cl::opt<QEDLevel> QEDMode 
+(
+    "QED-Mode", 
+    cl::init(ALL), 
+    cl::desc("Choose QED Mode:"),
+    cl::value_desc("QED Mode"),
+    cl::values
+    (
+        clEnumVal(EDDI , "Enable EDDI Transformations"),
+        clEnumVal(CFTSS, "Enable CFTSS Transformations"),
+        clEnumVal(CFCSS, "Enable CFCSS Transformations"),
+        clEnumVal(ALL,   "Enable All Transformations"),
+        clEnumValEnd
+    )
+);
+
 namespace
 {
     struct QED : public ModulePass
@@ -447,14 +473,15 @@ namespace
 			        return BinaryOperator::Create(op, input1, input2, name, insertBefore);
 		    }
 		}
-        Value * createCFCSSChecks(std::vector<int> possible_values, Value *previous_id, 
+        Value * createCFCSSChecks(std::vector<int> possible_values,
             Instruction * insertBefore, int current_basicblock_id, const Twine & name = "")
         {
             std::vector<Value *> res;
+            Value *loaded_cftss_id = new LoadInst(cftss_id, "", insertBefore);
             FORN(i, sz(possible_values))
             {
                 Value *temp = ConstantInt::get(Type::getInt32Ty(context), possible_values[i], false);
-                res.pb(CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, previous_id, temp, "", insertBefore));
+                res.pb(CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, loaded_cftss_id, temp, "", insertBefore));
             }
 
             Value *reduced_res = createReduction(Instruction::Or, res, insertBefore, name);
@@ -476,12 +503,6 @@ namespace
         	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             std::string bbname = bb->getName();
-    		// if(visited[bb])
-    		// {
-    		// 	errs()<<"this block has been visited before it seems?";
-    		// 	return;
-    		// }
-    		// visited[bb] = true;
             Instruction *I; Instruction *NI;
             std::vector<CallInst *> toBeRemoved;
             std::vector<Value *> createdCheckInsts;
@@ -537,21 +558,6 @@ namespace
             	CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
 
-            Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
-            Instruction *stored_value  = new StoreInst (tobestoredval, cftss_id, bb->getTerminator());
-
-            std::vector<int> possible_values;
-            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
-            {
-                BasicBlock *Pred = *PI;
-                possible_values.pb(get_value_from_map(Pred, bb_id_map));
-            }
-            if (sz(possible_values))
-            {
-                Value *current_id = new LoadInst(cftss_id, "", bb->getFirstInsertionPt());
-                createCFCSSChecks(possible_values, current_id, 
-                    stored_value, get_value_from_map(bb, bb_id_map), makeName(bb, "_cfcss_checks"));
-            }
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, 
             ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
@@ -578,6 +584,44 @@ namespace
             for each(child, *root)
                 mapBlockTree(*child, bb_id_map);
         }
+        void trackBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
+        {
+            Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
+            new StoreInst (tobestoredval, cftss_id, bb->getTerminator());
+        }
+        void trackBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
+        {
+            trackBasicBlock(root->getBlock(), bb_id_map);
+
+            for each(child, *root)
+                trackBlockTree(*child, bb_id_map);
+        }
+        void controlFlowCheckBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
+        {
+            std::vector<int> possible_values;
+            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
+            {
+                BasicBlock *Pred = *PI;
+                possible_values.pb(get_value_from_map(Pred, bb_id_map));
+            }
+            if (sz(possible_values))
+            {
+                createCFCSSChecks
+                    (
+                        possible_values, 
+                        bb->getFirstInsertionPt(), 
+                        get_value_from_map(bb, bb_id_map), 
+                        makeName(bb, "_cfcss_checks")
+                    );
+            }
+        }
+        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
+        {
+            controlFlowCheckBasicBlock(root->getBlock(), bb_id_map);
+
+            for each(child, *root)
+                controlFlowCheckBlockTree(*child, bb_id_map);
+        }
         void printName(Value *v)
         {
             errs()<<v->getName()<<"\n";
@@ -598,32 +642,42 @@ namespace
             map.insert(global_map.begin(), global_map.end());
 
             //TODO:Comment
+            //TODO: Use valueDuplicateMap instead bb_id_map
             mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
             //TODO:Comment
-            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
-
-            FORN(i,sz(toBeReplaced))
+            if(QEDMode == EDDI || QEDMode == ALL)
             {
-            	std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
-            	if(t.second)
-            	{
-            		if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
-            			db("Error on Replacing");
-            	}
-            }
-                
-            if (prototypeNeedsToBeModified(F))
-            {
-                FORE(iter, (*F))
+                cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
+                FORN(i,sz(toBeReplaced))
                 {
-                    ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
-                    if (ret && ret->getReturnValue())
+                    std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
+                    if(t.second)
                     {
-                        muxReturnInst(ret, map);
+                        if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
+                            db("Error on Replacing");
+                    }
+                }
+                if (prototypeNeedsToBeModified(F))
+                {
+                    FORE(iter, (*F))
+                    {
+                        ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                        if (ret && ret->getReturnValue())
+                        {
+                            muxReturnInst(ret, map);
+                        }
                     }
                 }
             }
+
+            //TODO: Comment
+            if (QEDMode >= CFTSS)
+                trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+
+            if (QEDMode >= CFCSS)
+                controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+
         }
         Constant * createStringConstant(const std::string & string)
 	    {
@@ -670,32 +724,38 @@ namespace
 	    }
         void createEDDICheckFunction(Module &module)
         {
-        	std::vector<Type*> Params;
-        	Params.pb(Type::getInt1Ty(context));
-        	llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
-        	module.getOrInsertFunction(EDDI_CHECK_FUNCTION_NAME, ftype);
-        	// Function * realFunc = dyn_cast<Function *>(func);
-        	EDDICheckFunction = module.getFunction(EDDI_CHECK_FUNCTION_NAME);
-        	Argument *check_value = &EDDICheckFunction->getArgumentList().front();
+            std::vector<Type*> Params;
+            Params.pb(Type::getInt1Ty(context));
+            llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
+            module.getOrInsertFunction(EDDI_CHECK_FUNCTION_NAME, ftype);
+            // Function * realFunc = dyn_cast<Function *>(func);
+            EDDICheckFunction = module.getFunction(EDDI_CHECK_FUNCTION_NAME);
+            Argument *check_value = &EDDICheckFunction->getArgumentList().front();
         	
-        	BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", EDDICheckFunction);
-        	BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", EDDICheckFunction);
-        	BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", EDDICheckFunction);
-        	std::vector<Value *> v;
+            BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", EDDICheckFunction);
+            BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", EDDICheckFunction);
+            BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", EDDICheckFunction);
 
-            Instruction *loadres = new LoadInst(cftss_id, "", bb3);
-        	v.pb(loadres);
-        	createPrintfCall("eddimessage", "EDDI Failed. The last basic block that got executed was = %d\n", v, bb3, &module);
-        	createExitCall(one, bb3, &module);
-        	BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
-        	branchinst = BranchInst::Create(bb2, bb3);
+            std::vector<Value *> v;
+            createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
+            if (QEDMode == ALL)
+            {
+                Instruction *loadres = new LoadInst(cftss_id, "", bb3);
+                v.pb(loadres);
+                createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
+            }
+            createExitCall(one, bb3, &module);
+            BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
+            branchinst = BranchInst::Create(bb2, bb3);
 
-        	llvm::ReturnInst::Create(context, 0, bb2);
+            llvm::ReturnInst::Create(context, 0, bb2);
 
 
         }
         void createCFCSSCheckFunction(Module &module)
         {
+            assert (QEDMode == ALL || QEDMode == CFCSS);
+
             std::vector<Type*> Params;
             Params.pb(Type::getInt1Ty(context));
             Params.pb(Type::getInt32Ty(context));
@@ -738,27 +798,38 @@ namespace
         }
         bool runOnModule(Module &M)
         {
-        	currentBasicBlock = 1;
-			ValueDuplicateMap map;
-			cloneGlobalVariables(M, map);
+            currentBasicBlock = 1;
+            ValueDuplicateMap map;
+            cloneGlobalVariables(M, map);
 
-			cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, 
+            if (QEDMode >= CFTSS)
+            {
+                cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, 
                 GlobalValue::PrivateLinkage, ConstantInt::get(Type::getInt32Ty(context), 0, false), "CFTSSID");
-            // cftss_id->setThreadLocal(true);
+                // cftss_id->setThreadLocal(true);
+            }
 
-			createEDDICheckFunction(M);
-            createCFCSSCheckFunction(M);
+            if (QEDMode == EDDI || QEDMode == ALL)
+                createEDDICheckFunction(M);
 
-			FORE(iter, M)
-				if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
-				{
-					modifyPrototype(iter,map);
-				}
+            if (QEDMode >= CFCSS)
+                createCFCSSCheckFunction(M);
 
-			FORE(iter, M)
-				if (!((*iter).isDeclaration()))
-					cloneFunction(iter, map, M);
-			return true;
+            if (QEDMode == ALL || QEDMode == EDDI)
+            {
+                FORE(iter, M)
+                if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
+                {
+                    modifyPrototype(iter,map);
+                }
+            }
+
+            //TODO: Comment
+            FORE(iter, M)
+                if (!((*iter).isDeclaration()))
+                    cloneFunction(iter, map, M);
+
+            return true;
         }
 		void getAnalysisUsage(AnalysisUsage & info) const
 		{
