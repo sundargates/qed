@@ -279,6 +279,18 @@ namespace
             success &= isa<PHINode>(inst);
             return success;
         }
+        bool isGetElementPtrInst(Instruction *inst)
+        {
+            bool success = true;
+            success &= isa<GetElementPtrInst>(inst);
+            return success;
+        }
+        bool isCastInst(Instruction *inst)
+        {
+            bool success = true;
+            success &= isa<CastInst>(inst);
+            return success;
+        }
         bool isCallable(Value *inst)
         {
         	CallInst *call = dyn_cast<CallInst>(inst);
@@ -474,22 +486,11 @@ namespace
                     	NI->setName(makeName(I, "_dup"));
                     NI->insertAfter(I);
                     skip++;
-                    if(I->mayReturn() && hasOutput(I) && !isPhi(I))
+
+                    //TODO: have to change this to support only instructions that need to validated with EDDI
+                    if(I->mayReturn() && hasOutput(I) && !isPhi(I) && !isGetElementPtrInst(I) && !isCastInst(I))
                         previous = true;
                 }
-                // else
-                // if(isPhi(iter))
-                // {
-                // 	skip++;
-                // 	I = iter;
-                // 	NI = I->clone();
-                // 	mapOperands(NI, map);
-                // 	map[I] = NI;
-                // 	if(I->hasName())
-                //         NI->setName(makeName(I, "_dup"));
-                //     NI->insertAfter(I);
-                // }
-	            
 	        }
             FORN(i, sz(toBeRemoved))
             {
@@ -625,7 +626,7 @@ namespace
         	v.pb(loadres);
         	createPrintfCall("printfresult", "The last basic block that got executed was = %d\n", v, bb3, &module);
         	createExitCall(one, bb3, &module);
-        	BranchInst *branchinst = BranchInst::Create(bb2, bb3, check_value, bb1);
+        	BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
         	branchinst = BranchInst::Create(bb2, bb3);
 
         	llvm::ReturnInst::Create(context, 0, bb2);
@@ -637,7 +638,8 @@ namespace
         	currentBasicBlock = 1;
 			ValueDuplicateMap map;
 			cloneGlobalVariables(M, map);
-			cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, GlobalValue::PrivateLinkage, ConstantInt::get(Type::getInt32Ty(context), 0, false), "CFTSSID");
+			cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, 
+                GlobalValue::PrivateLinkage, ConstantInt::get(Type::getInt32Ty(context), 0, false), "CFTSSID");
 			createErrorCheckFunction(M);
 			FORE(iter, M)
 				if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
