@@ -35,6 +35,7 @@
 
 
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -76,6 +77,15 @@ namespace
         static char ID;
         Value *one;
         LLVMContext & context;
+        Function *checkFunction;
+        IntegerType * i1;
+	    IntegerType * i8;
+	    IntegerType * i32;
+	    ConstantInt * i1_true;
+	    ConstantInt * i1_false;
+	    ConstantInt * i32_zero;
+	    int currentBasicBlock;
+	    GlobalVariable *cftss_id;
 //         void modifyPrototype(Function *F)
 //         {
 //             // Start by computing a new prototype for the function, which is the same as
@@ -386,11 +396,19 @@ namespace
 //         }
         QED() : ModulePass(ID), context(getGlobalContext())
         {
-                    one = ConstantInt::get(Type::getInt32Ty(context),1);
+            one = ConstantInt::get(Type::getInt32Ty(context),1);
+            i1 = Type::getInt1Ty(context);
+	        i8 = Type::getInt8Ty(context);
+	        i32 = Type::getInt32Ty(context);
+	        i1_true = ConstantInt::get(i1, true);
+	        i1_false = ConstantInt::get(i1, false);
+	        i32_zero = ConstantInt::get(i32, 0);
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
-            return !F->getBasicBlockList().empty() && F->size() && F->getName().compare("main") && (F->getName().find("entry_point")==StringRef::npos);
+            return !F->getBasicBlockList().empty() && F->size() && F->getName().compare("main") 
+            	&& (F->getName().find("entry_point")==StringRef::npos)
+            	&& F->getName().compare("check_function");
         }
 		unsigned bitWidth(Type * type)
 		{
@@ -617,7 +635,7 @@ namespace
         {
             bool float_type = a->getType()->isFPOrFPVectorTy();
             CmpInst::OtherOps op = float_type ? Instruction::FCmp : Instruction::ICmp;
-            CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_OEQ : CmpInst::ICMP_EQ;
+            CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_ONE : CmpInst::ICMP_NE;
             CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name, insertBefore);
             return cmp;
         }
@@ -701,10 +719,36 @@ namespace
 	    		}
     		return false;
         }
+        Instruction *getNextInstruction(Instruction *inst)
+        {
+        	BasicBlock::iterator iter = inst;
+            Instruction *nextInstruction = ++iter;
+            if(nextInstruction==inst->getParent()->end())
+            	return NULL;
+            return nextInstruction;
+        }
+        Value * createReduction(Instruction::BinaryOps op, ArrayRef<Value *> inputs, Instruction * insertBefore, const Twine & name = "")
+		{
+		    size_t size = inputs.size();
+		    switch (size)
+		    {
+			    case 0:
+			        return NULL;
+			    case 1:
+			        return inputs[0];
+			    default:
+			        size_t middle = size / 2;
+			        Value * input1 = createReduction(op, inputs.slice(0, middle), insertBefore);
+			        Value * input2 = createReduction(op, inputs.slice(middle), insertBefore);
+			        return BinaryOperator::Create(op, input1, input2, name, insertBefore);
+		    }
+		}
         void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited, 
         	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             // errs()<<bb->getName()<<"\n";
+            std::string bbname = bb->getName();
+            // int currentSplit = 0;
     		if(visited[bb])
     		{
     			errs()<<"this block has been visited before it seems?";
@@ -713,68 +757,56 @@ namespace
     		visited[bb] = true;
             Instruction *I; Instruction *NI;
             std::vector<CallInst *> toBeRemoved;
-            std::vector<CmpInst *> createdCheckInsts;
+            std::vector<Value *> createdCheckInsts;
             bool previous = false;
             int skip = 0;
             FORE(iter, (*bb))
             {
                 // iter->dump();
-                // if(dontClone)
-                // {
-                // 	Instruction *inst = iter;
-                // 	CallInst *call = dyn_cast<CallInst>(iter);
-	               //  if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
-	               //  	continue;
-	               //  if(inst->hasName() && (inst->getName().endswith("_dup") || inst->getName().endswith("_check")))
-		              //   if(isCloneable(inst))
-	            			// mapOperands(inst, map);
-                // }
+                if(skip)
+                {
+                	skip --;
+                	continue;
+                }
+                if(previous)
+                {
+                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
+                    createdCheckInsts.pb(cmp);
+                    previous = false;
+                }
+                CallInst *call = dyn_cast<CallInst>(iter);
+                if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
+                {
+                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
+                    modifyCallInstruction(call, map, toBeRemoved);
+                }
+                else
+                if(isCloneable(iter))
+                {
+                	// iter->dump();
+                    I = iter;
+                    NI = I->clone();
+                    mapOperands(NI, map, toBeReplaced);
+                    map[I] = NI;
+                    if(I->hasName())
+                    	NI->setName(makeName(I, "_dup"));
+                    NI->insertAfter(I);
+                    skip++;
+                    if(I->mayReturn() && hasOutput(I) && !isPhi(I))
+                        previous = true;
+                }
                 // else
+                // if(isPhi(iter))
                 // {
-	                if(skip)
-	                {
-	                	skip --;
-	                	continue;
-	                }
-	                if(previous)
-	                {
-	                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
-	                    createdCheckInsts.pb(cmp);
-	                    previous = false;
-	                }
-	                CallInst *call = dyn_cast<CallInst>(iter);
-	                if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
-	                {
-	                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
-	                    modifyCallInstruction(call, map, toBeRemoved);
-	                }
-	                else
-	                if(isCloneable(iter))
-	                {
-	                	// iter->dump();
-	                    I = iter;
-	                    NI = I->clone();
-	                    mapOperands(NI, map, toBeReplaced);
-	                    map[I] = NI;
-	                    if(I->hasName())
-	                    	NI->setName(makeName(I, "_dup"));
-	                    NI->insertAfter(I);
-	                    skip++;
-	                    if(I->mayReturn() && hasOutput(I) && !isPhi(I))
-	                        previous = true;
-	                }
-	                // else
-	                // if(isPhi(iter))
-	                // {
-	                // 	skip++;
-	                // 	I = iter;
-	                // 	NI = I->clone();
-	                // 	mapOperands(NI, map);
-	                // 	map[I] = NI;
-	                // 	if(I->hasName())
-	                //         NI->setName(makeName(I, "_dup"));
-	                //     NI->insertAfter(I);
-	                // }
+                // 	skip++;
+                // 	I = iter;
+                // 	NI = I->clone();
+                // 	mapOperands(NI, map);
+                // 	map[I] = NI;
+                // 	if(I->hasName())
+                //         NI->setName(makeName(I, "_dup"));
+                //     NI->insertAfter(I);
+                // }
 	            
 	        }
             FORN(i, sz(toBeRemoved))
@@ -782,7 +814,16 @@ namespace
                 CallInst *temp = toBeRemoved[i];
                 temp->eraseFromParent();
             }
-            // db(sz(toBeReplaced));
+
+            if(sz(createdCheckInsts))
+            {
+            	Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
+            	// Function * exit_func = getExternalFunction("exit", exit_type, module);
+            	// assert(exit_func);
+            	// CallInst::Create(checkFunction, error, "", bb->getTerminator());
+            }
+            Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), currentBasicBlock++, false);
+    		new StoreInst (tobestoredval, cftss_id, bb->getFirstInsertionPt());
             
    //          int pos = 0;
    //          previous = false;
@@ -837,7 +878,7 @@ namespace
    //              iter++;
 			// }
 			// if(pos!=sz(createdCheckInsts))	errs()<<"THere definitely is an error here\n";
-			// // errs()<<bb->getName()<<" We did not come here2\n";
+			// errs()<<bb->getName()<<" We did not come here2\n";
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, bool> &visited, 
         	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
@@ -853,6 +894,8 @@ namespace
         void cloneFunction(Function *F, ValueDuplicateMap & global_map, Module &M)
         {
             // printName(F);
+            if(F->getName() == "check_function")
+            	return;
             std::	map<BasicBlock *, bool> visited;
 
             std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
@@ -892,10 +935,82 @@ namespace
                 }
             }
         }
+        Constant * createStringConstant(const std::string & string)
+	    {
+	        std::vector<Constant *> necklace;
+	        for each(character, string)
+	        {
+	            necklace.push_back(ConstantInt::get(i8, *character));
+	        }
+	        return ConstantArray::get(ArrayType::get(i8, string.size()), necklace);
+	    }
+
+	    // Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
+	    // {
+	    //     module->getOrInsertFunction(name, type);
+	    //     Function * function = module->getFunction(name);
+	    //     assert(function);
+	    //     return function;
+	    // }
+
+	    CallInst * createPrintfCall(Twine format_name, const std::string & format_val,
+	                                ArrayRef<Value *> args, BasicBlock * block, Module * module)
+	    {
+	        /* Get printf function, adding declaration if needed */
+	        FunctionType * printf_type = FunctionType::get(i32, PointerType::get(i8, 0), true);
+	        Function * printf_func = getExternalFunction("printf", printf_type, module);
+
+	        /* Add global string constant for format */
+	        Constant * format_data = createStringConstant(format_val);
+	        GlobalVariable * format = new GlobalVariable(format_data->getType(), true, GlobalValue::PrivateLinkage,
+	                                                     format_data, format_name);
+	        format->setUnnamedAddr(true);
+	        format->setAlignment(1);
+	        module->getGlobalList().push_back(format);
+
+	        /* Build argument list */
+	        std::vector<Value *> arg_list;
+	        Value * zero_zero[] = { i32_zero, i32_zero };
+	        arg_list.push_back(ConstantExpr::getInBoundsGetElementPtr(format, zero_zero));
+	        arg_list.insert(arg_list.end(), args.begin(), args.end());
+
+	        CallInst * call = CallInst::Create(printf_func, arg_list, "", block);
+	        call->setDoesNotThrow();
+	        return call;
+	    }
+        void createErrorCheckFunction(Module &module)
+        {
+        	std::vector<Type*> Params;
+        	Params.pb(Type::getInt1Ty(context));
+        	llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
+        	module.getOrInsertFunction("check_function", ftype);
+        	// Function * realFunc = dyn_cast<Function *>(func);
+        	checkFunction = module.getFunction("check_function");
+        	Argument *check_value = &checkFunction->getArgumentList().front();
+        	
+        	BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", checkFunction);
+        	BasicBlock* bb3 = llvm::BasicBlock::Create(context, "return_block", checkFunction);
+        	BasicBlock* bb2 = llvm::BasicBlock::Create(context, "exit_block", checkFunction);
+        	// IRBuilder<> Builder(Entry);
+        	std::vector<Value *> v;
+        	// s
+        	v.pb(cftss_id);
+        	createPrintfCall("printfresult", "This was the CFTSSID was = %d\n", v, bb2, &module);
+        	createExitCall(one, bb2, &module);
+        	BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
+        	branchinst = BranchInst::Create(bb3, bb2);
+
+        	llvm::ReturnInst::Create(context, 0, bb3);
+
+
+        }
         bool runOnModule(Module &M)
         {
+        	currentBasicBlock = 1;
 			ValueDuplicateMap map;
 			cloneGlobalVariables(M, map);
+			cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, GlobalValue::PrivateLinkage, ConstantInt::get(Type::getInt32Ty(context), 0, false), "CFTSSID");
+			createErrorCheckFunction(M);
 			FORE(iter, M)
 				if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
 				{
