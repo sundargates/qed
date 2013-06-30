@@ -97,11 +97,18 @@ namespace
         IntegerType * i1;
 	    IntegerType * i8;
 	    IntegerType * i32;
+        IntegerType * i64;
 	    ConstantInt * i1_true;
 	    ConstantInt * i1_false;
 	    ConstantInt * i32_zero;
 	    int currentBasicBlock;
-	    GlobalVariable *cftss_id;
+        int NUM_ELEMENTS_IN_CFTSS_ARRAY;
+
+
+	    GlobalVariable *last_cftss_id;
+        GlobalVariable *cftss_array;
+        GlobalVariable *cftss_array_pos;
+        GlobalVariable *cftss_array_n;
 
         Function *EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
@@ -111,15 +118,19 @@ namespace
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
-            one = ConstantInt::get(Type::getInt32Ty(context),1);
-            i1 = Type::getInt1Ty(context);
-	        i8 = Type::getInt8Ty(context);
-	        i32 = Type::getInt32Ty(context);
-	        i1_true = ConstantInt::get(i1, true);
-	        i1_false = ConstantInt::get(i1, false);
-	        i32_zero = ConstantInt::get(i32, 0);
-            EDDI_CHECK_FUNCTION_NAME = "eddi_check_function";
-            CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
+            i1                          = Type::getInt1Ty(context);
+            i8                          = Type::getInt8Ty(context);
+            i32                         = Type::getInt32Ty(context);
+            i64                         = Type::getInt64Ty(context);
+            
+            one                         = ConstantInt::get(Type::getInt32Ty(context),1);
+            i1_true                     = ConstantInt::get(i1, true);
+            i1_false                    = ConstantInt::get(i1, false);
+            i32_zero                    = ConstantInt::get(i32, 0);
+            EDDI_CHECK_FUNCTION_NAME    = "eddi_check_function";
+            CFCSS_CHECK_FUNCTION_NAME   = "cfcss_check_function";
+            
+            NUM_ELEMENTS_IN_CFTSS_ARRAY = 10;
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
@@ -248,7 +259,6 @@ namespace
             func->setAttributes(NewPAL);
 
         }
-
         std::pair<Value *, bool>  mapValue(Value * value, ValueDuplicateMap & map)
         {
             Value * direct_match = map.lookup(value);
@@ -477,7 +487,7 @@ namespace
             Instruction * insertBefore, int current_basicblock_id, const Twine & name = "")
         {
             std::vector<Value *> res;
-            Value *loaded_cftss_id = new LoadInst(cftss_id, "", insertBefore);
+            Value *loaded_cftss_id = new LoadInst(last_cftss_id, "", insertBefore);
             FORN(i, sz(possible_values))
             {
                 Value *temp = ConstantInt::get(Type::getInt32Ty(context), possible_values[i], false);
@@ -586,8 +596,62 @@ namespace
         }
         void trackBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
-            Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
-            new StoreInst (tobestoredval, cftss_id, bb->getTerminator());
+            std::vector<Instruction *> cftss_block;
+            
+            Value *tobestoredval                = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
+
+            //Increment N indicating that the number of reached basic blocks is one more.
+            Instruction *loaded_cftss_array_n   = new LoadInst(cftss_array_n, "");
+            cftss_block.pb(loaded_cftss_array_n);
+            Instruction *increment_n            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_n, one);
+            cftss_block.pb(increment_n);
+            cftss_block.pb(new StoreInst(increment_n, cftss_array_n));
+            
+            // Push the new basic block ID into the vector and pop one if necessary.
+            Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "");
+            cftss_block.pb(loaded_cftss_array_pos);
+            Instruction *sext_cftss_array_pos   = new SExtInst(loaded_cftss_array_pos, i64, "");
+            cftss_block.pb(sext_cftss_array_pos);
+            
+
+            std::vector<Value *> temp;
+            temp.pb(i32_zero);
+            temp.pb(sext_cftss_array_pos);
+
+
+
+            Instruction *get_element_ptr_inst = GetElementPtrInst::CreateInBounds(cftss_array, temp, "");
+            cftss_block.pb(get_element_ptr_inst);
+            
+            Instruction *store_inst           = new StoreInst (tobestoredval, get_element_ptr_inst);
+            cftss_block.pb(store_inst);
+            
+            Instruction *increment            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one);
+            cftss_block.pb(increment);
+            
+            Instruction *mod_instruction      = BinaryOperator::Create(Instruction::URem, increment, ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY));
+            cftss_block.pb(mod_instruction);
+            
+            Instruction *final_store          = new StoreInst (mod_instruction, get_element_ptr_inst);
+            cftss_block.pb(final_store);
+
+
+
+            //TODO: clean up this code.
+            Instruction *insertionPoint = bb->getFirstInsertionPt();
+            FORN(i, sz(cftss_block))
+                cftss_block[i]->insertBefore(insertionPoint);
+
+            // loaded_cftss_array_pos->insertBefore();
+            // sext_cftss_array_pos->insertAfter(loaded_cftss_array_pos);
+            // get_element_ptr_inst->insertAfter(sext_cftss_array_pos);
+            // store_inst->insertAfter(get_element_ptr_inst);
+            // increment->insertAfter(store_inst);
+            // mod_instruction->insertAfter(increment);
+
+
+
+            new StoreInst (tobestoredval, last_cftss_id, bb->getTerminator());
         }
         void trackBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
@@ -617,6 +681,7 @@ namespace
         }
         void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
+            assert((QEDMode == CFCSS || QEDMode == ALL) && "This mode shouldn't use CFCSS");
             controlFlowCheckBasicBlock(root->getBlock(), bb_id_map);
 
             for each(child, *root)
@@ -626,9 +691,10 @@ namespace
         {
             errs()<<v->getName()<<"\n";
         }
+
         void cloneFunction(Function *F, ValueDuplicateMap & global_map, Module &M)
         {
-            // printName(F);
+            //TODO: Can do better than this.
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME)
             	return;
 
@@ -645,31 +711,44 @@ namespace
             //TODO: Use valueDuplicateMap instead bb_id_map
             mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
-            //TODO:Comment
+
+
+
+            //This is EDDI-V essentially.
             if(QEDMode == EDDI || QEDMode == ALL)
             {
+
+                // EDDI_V!
                 cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
+
+                // Phi-Node handler
                 FORN(i,sz(toBeReplaced))
                 {
                     std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
                     if(t.second)
-                    {
                         if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
+                        {
                             db("Error on Replacing");
-                    }
+                            exit(-1);
+                        }
                 }
+
+                // Replace the return instructions
+                // This has to be done last because you may not have replicated everything if you just replace 
+                // the return instruction in cloneBasicBlock
                 if (prototypeNeedsToBeModified(F))
                 {
                     FORE(iter, (*F))
                     {
                         ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
                         if (ret && ret->getReturnValue())
-                        {
                             muxReturnInst(ret, map);
-                        }
                     }
                 }
             }
+
+
+
 
             //TODO: Comment
             if (QEDMode >= CFTSS)
@@ -740,7 +819,7 @@ namespace
             createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
             if (QEDMode == ALL)
             {
-                Instruction *loadres = new LoadInst(cftss_id, "", bb3);
+                Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
                 v.pb(loadres);
                 createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
             }
@@ -782,7 +861,7 @@ namespace
 
             std::vector<Value *> v1, v2;
 
-            Instruction *loadres = new LoadInst(cftss_id, "", bb3);
+            Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
             v1.pb(loadres);
             createPrintfCall("cfcssmessage1", "CFCSS Failed. The CFTSS ID was = %d\n", v1, bb3, &module);
 
@@ -796,6 +875,18 @@ namespace
 
 
         }
+        ArrayType *getArrayType(Type *t, int N)
+        {
+            return ArrayType::get(t, N);
+        }
+        bool canCloneFunction(Function *F)
+        {
+            if(F->getName() == EDDI_CHECK_FUNCTION_NAME)
+                return false;
+            if(F->getName() == CFCSS_CHECK_FUNCTION_NAME)
+                return false;
+            return true;
+        }
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -804,8 +895,46 @@ namespace
 
             if (QEDMode >= CFTSS)
             {
-                cftss_id = new GlobalVariable(M, Type::getInt32Ty(context), false, 
-                GlobalValue::PrivateLinkage, ConstantInt::get(Type::getInt32Ty(context), 0, false), "CFTSSID");
+                std::vector<Constant *> temp;
+                FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
+                    temp.pb(i32_zero);
+
+                last_cftss_id = new GlobalVariable
+                                            (
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero, 
+                                                "LAST_CFTSS_ID"
+                                            );
+                cftss_array = new GlobalVariable
+                                            (  
+                                                M, 
+                                                getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                ConstantArray::get(getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), temp), 
+                                                "CFTSS_ARRAY"
+                                            );
+                cftss_array_pos = new GlobalVariable
+                                            (  
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero, 
+                                                "CFTSS_ARRAY_POS"
+                                            );
+                cftss_array_n = new GlobalVariable
+                                            (  
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero, 
+                                                "CFTSS_ARRAY_N"
+                                            );
                 // cftss_id->setThreadLocal(true);
             }
 
@@ -818,15 +947,15 @@ namespace
             if (QEDMode == ALL || QEDMode == EDDI)
             {
                 FORE(iter, M)
-                if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
-                {
-                    modifyPrototype(iter,map);
-                }
+                    if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
+                    {
+                        modifyPrototype(iter,map);
+                    }
             }
 
             //TODO: Comment
             FORE(iter, M)
-                if (!((*iter).isDeclaration()))
+                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, M);
 
             return true;
