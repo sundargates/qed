@@ -947,22 +947,6 @@ namespace
             //for.end:
                 createExitCall(one, bb7, &module);
                 BranchInst::Create(bb2, bb7);
-
-                
-
-
-            // TODO: Code to be deleted
-            // Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
-
-            // // v1.pb(loadres);
-            // createPrintfCall("cfcssmessage1", "CFCSS Failed. The CFTSS ID was = %d\n", v1, bb3, &module);
-
-            // v2.pb(loadedvalue);
-            // createPrintfCall("cfcssmessage2", "The Basic Block ID in which the check failed was = %d\n", v2, bb3, &module);
-
-            // AllocaInst *a_addr = new AllocaInst (Type::getInt32Ty(context), 0, "a.addr", bb1);
-            // new StoreInst (arg_list[1], a_addr, bb1);
-            // LoadInst *loadedvalue = new LoadInst(a_addr, "", bb1);
         }
         ArrayType *getArrayType(Type *t, int N)
         {
