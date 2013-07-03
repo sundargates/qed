@@ -497,7 +497,7 @@ namespace
             Value *reduced_res = createReduction(Instruction::Or, res, insertBefore, name);
             std::vector<Value *> args;
             args.pb(reduced_res);
-            args.pb(ConstantInt::get(Type::getInt32Ty(context), current_basicblock_id, false));
+            // args.pb(ConstantInt::get(Type::getInt32Ty(context), current_basicblock_id, false));
             return CallInst::Create(CFCSSCheckFunction, args, "", insertBefore);
         }
         int get_value_from_map(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
@@ -836,8 +836,9 @@ namespace
             assert (QEDMode == ALL || QEDMode == CFCSS);
 
             std::vector<Type*> Params;
+            std::vector<Value *> temp;
+
             Params.pb(Type::getInt1Ty(context));
-            Params.pb(Type::getInt32Ty(context));
 
             llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
             module.getOrInsertFunction(CFCSS_CHECK_FUNCTION_NAME, ftype);
@@ -851,29 +852,117 @@ namespace
             BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", CFCSSCheckFunction);
             BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", CFCSSCheckFunction);
             BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", CFCSSCheckFunction);
+
+            BasicBlock* bb4 = llvm::BasicBlock::Create(context, "for.cond", CFCSSCheckFunction);
+            BasicBlock* bb5 = llvm::BasicBlock::Create(context, "for.body", CFCSSCheckFunction);
+            BasicBlock* bb6 = llvm::BasicBlock::Create(context, "for.inc", CFCSSCheckFunction);
+            BasicBlock* bb7 = llvm::BasicBlock::Create(context, "for.end", CFCSSCheckFunction);
+
             
 
-            AllocaInst *a_addr = new AllocaInst (Type::getInt32Ty(context), 0, "a.addr", bb1);
-            new StoreInst (arg_list[1], a_addr, bb1);
-            LoadInst *loadedvalue = new LoadInst(a_addr, "", bb1);
-            BranchInst *branchinst = BranchInst::Create(bb2, bb3, arg_list[0], bb1);
+            BranchInst::Create(bb2, bb3, arg_list[0], bb1); // BB1->BB2 or BB3
+
+            // return_block:                                     ; preds = %for.end, %check_block
+            //     ret void
+
+            // return_block:
+                ReturnInst::Create(context, 0, bb2);
+
+            // std::vector<Value *> v1, v2;
 
 
-            std::vector<Value *> v1, v2;
+            // Basic Block 3 LLVM IR code:
+            // This is where the control gets into if CFCSS check fails. 
+            // We basically want to print all the basic blocks list in this place.
 
-            Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
-            v1.pb(loadres);
-            createPrintfCall("cfcssmessage1", "CFCSS Failed. The CFTSS ID was = %d\n", v1, bb3, &module);
+            // exit_block: 
+            //     %i = alloca i32, align 4
+            //     store i32 0, i32* %i, align 4
+            //     br label %for.cond
 
-            v2.pb(loadedvalue);
-            createPrintfCall("cfcssmessage2", "The Basic Block ID in which the check failed was = %d\n", v2, bb3, &module);
+            // for.cond:                                         ; preds = %for.inc, %entry
+            //     %0 = load i32* %i, align 4
+            //     %cmp = icmp slt i32 %0, 10
+            //     br i1 %cmp, label %for.body, label %for.end
 
-            createExitCall(one, bb3, &module);
-            branchinst = BranchInst::Create(bb2, bb3);
+            // for.body:                                         ; preds = %for.cond
+            //     %1 = load i32* @temp, align 4
+            //     %idxprom = sext i32 %1 to i64
+            //     %arrayidx = getelementptr inbounds [100 x i32]* @array, i32 0, i64 %idxprom
+            //     %2 = load i32* %arrayidx, align 4
+            //     %call = call i32 (i8*, ...)* @printf(i8* getelementptr inbounds ([4 x i8]* @.str, i32 0, i32 0), i32 %2)
+            //     br label %for.inc
 
-            llvm::ReturnInst::Create(context, 0, bb2);
+            // for.inc:                                          ; preds = %for.body
+            //     %3 = load i32* %i, align 4
+            //     %inc = add nsw i32 %3, 1
+            //     store i32 %inc, i32* %i, align 4
+            //     %4 = load i32* @temp, align 4
+            //     %inc1 = add nsw i32 %4, 1
+            //     store i32 %inc1, i32* @temp, align 4
+            //     %5 = load i32* @temp, align 4
+            //     %rem = srem i32 %5, 10
+            //     store i32 %rem, i32* @temp, align 4
+            //     br label %for.cond
+
+            // for.end:                                          ; preds = %for.cond
+            //     call void @exit(i32 1) #2
+            //     br label %return_block
 
 
+            // exit_block:
+                Instruction *i_alloc = new AllocaInst (Type::getInt32Ty(context), 0, "i", bb3);
+                new StoreInst(i32_zero, i_alloc, bb3);
+                BranchInst::Create(bb4, bb3);
+
+            // for.cond:
+                Instruction *load_i = new LoadInst(i_alloc, "", bb4);
+                Instruction *cmp    = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, load_i, 
+                                        ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "cmp", bb4); 
+                BranchInst::Create(bb5, bb7, cmp, bb4);// BB4->BB5 or BB7
+
+            //for.body:
+                Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb5);
+                Instruction *sext_cftss_array_pos   = new SExtInst(loaded_cftss_array_pos, i64, "idxprom", bb5);
+                temp.pb(i32_zero);
+                temp.pb(sext_cftss_array_pos);
+                Instruction *get_element_ptr_inst   = GetElementPtrInst::CreateInBounds(cftss_array, temp, "arrayidx", bb5);
+                Instruction *loaded_array_val       = new LoadInst(get_element_ptr_inst, "", bb5);
+                temp.clear();
+                temp.pb(loaded_array_val);
+                createPrintfCall("cfcssmessage1", "Basic Block ID = %d\n", temp, bb5, &module);
+                BranchInst::Create(bb6, bb5);
+
+            //for.inc:
+                load_i                       = new LoadInst(i_alloc, "", bb6);
+                Instruction *increment       = BinaryOperator::Create(Instruction::Add, load_i, one, "inc", bb6);
+                new StoreInst(increment, i_alloc, bb6);
+                loaded_cftss_array_pos       = new LoadInst(cftss_array_pos, "", bb6);
+                increment                    = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one, "inc1", bb6);
+                Instruction *mod_instruction = BinaryOperator::Create(Instruction::SRem, increment, 
+                                                ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb6);
+                new StoreInst(mod_instruction, cftss_array_pos, bb6);
+                BranchInst::Create(bb4, bb6);
+
+            //for.end:
+                createExitCall(one, bb7, &module);
+                BranchInst::Create(bb2, bb7);
+
+                
+
+
+            // TODO: Code to be deleted
+            // Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
+
+            // // v1.pb(loadres);
+            // createPrintfCall("cfcssmessage1", "CFCSS Failed. The CFTSS ID was = %d\n", v1, bb3, &module);
+
+            // v2.pb(loadedvalue);
+            // createPrintfCall("cfcssmessage2", "The Basic Block ID in which the check failed was = %d\n", v2, bb3, &module);
+
+            // AllocaInst *a_addr = new AllocaInst (Type::getInt32Ty(context), 0, "a.addr", bb1);
+            // new StoreInst (arg_list[1], a_addr, bb1);
+            // LoadInst *loadedvalue = new LoadInst(a_addr, "", bb1);
         }
         ArrayType *getArrayType(Type *t, int N)
         {
