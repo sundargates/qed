@@ -134,10 +134,13 @@ namespace
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
-            return !F->getBasicBlockList().empty() && F->size() && F->getName().compare("main") 
-            	&& (F->getName().find("entry_point")==StringRef::npos)
-            	&& F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
-                && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME);
+            // db(F->getName());
+            return  F!=NULL
+                    && (!F->getBasicBlockList().empty() && F->size())
+                    && F->getName().compare("main") 
+                    && (F->getName().find("entry_point")==StringRef::npos)
+                    && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
+                    && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME);
         }
 		unsigned bitWidth(Type * type)
 		{
@@ -169,7 +172,8 @@ namespace
 			for (Module::global_iterator I = M.global_begin(), E = M.global_end(); I != E; ++I)
 			{
 				// Ignore all 'special' globals.
-				if (I->getName().startswith("llvm.") || I->getName().startswith(".llvm."))
+                // db(I->getName());
+				if (I->getName().startswith("llvm.") || I->getName().startswith(".llvm.") || I->getName().startswith("__"))
 					continue;
 				cloneGlobal(I, M, map);
 			}
@@ -179,6 +183,7 @@ namespace
             /* Modify function type to reflect duplicated arguments, muxed return type */
             FunctionType * type = func->getFunctionType();
             Type * return_type = type->getReturnType();
+            const AttributeSet &PAL = func->getAttributes();
 
             std::vector<Type *> arg_types;
             for each_custom(arg_type, *type, param_begin, param_end)
@@ -217,19 +222,16 @@ namespace
             
             // The existing function return attributes.
             SmallVector<AttributeSet, 8> AttributesVec;
-            const AttributeSet &PAL = func->getAttributes();
-            AttributeSet RAttrs = PAL.getRetAttributes();
-            
-            //Add the return attributes to the new attributes set
-            if (RAttrs.hasAttributes(AttributeSet::ReturnIndex))
-                AttributesVec.push_back(AttributeSet::get(context, RAttrs));
+
+            //Push empty attribute set for Return Index because the older attributes may not be valid anymore
+            AttributesVec.pb(AttributeSet());
                 
                 
             // Construct the new parameter list from non-dead arguments. Also construct
             // a new set of parameter attributes to correspond. Skip the first parameter
             // attribute, since that belongs to the return value.
             unsigned i = 0;
-            unsigned size = 0;
+            // unsigned size = 0;
             for (Function::arg_iterator I = func->arg_begin(), E = func->arg_end();
             I != E; ++I, ++i)
             {
@@ -237,19 +239,12 @@ namespace
                 // for the return value.
                 // Push the attributes twice to reflect the fact that the
                 // arguments have been duplicated.
-                size += 2;
-                if (PAL.hasAttributes(i + 1))
-                {
-                    AttrBuilder B(PAL, i + 1);
-                    AttrBuilder B_dup(PAL, i + 1);
-                    AttributesVec.
-                    push_back(AttributeSet::get(context, size-1, B));
-                    AttributesVec.
-                    push_back(AttributeSet::get(context, size, B_dup));
-                }
+                AttributeSet temp = PAL.getParamAttributes(i+1);
+                AttributesVec.push_back(temp);
+                AttributesVec.push_back(temp);
             }
 
-            //Push the Function attributes
+            // Push the Function attributes
             if (PAL.hasAttributes(AttributeSet::FunctionIndex))
                 AttributesVec.push_back(AttributeSet::get(func->getContext(),
                                           PAL.getFnAttributes()));
@@ -314,8 +309,11 @@ namespace
         	bool success = true;
             success &= !isa<TerminatorInst>(inst);
             // success &= !isa<PHINode>(inst);
+
             CallInst *call = dyn_cast<CallInst>(inst);
-            success &= !call || (call && (call->isInlineAsm() || call->getCalledFunction()->getName() == "printf"));
+            success &= !call || (call && (call->isInlineAsm())); 
+
+                // || call->getCalledFunction()->getName() == "printf"));
             return success;
         }
         bool isPhi(Instruction *inst)
@@ -418,7 +416,7 @@ namespace
             }
             Function * function = call->getCalledFunction();
             CallInst * new_call = CallInst::Create(function, args, "", call);
-            new_call->setAttributes(call->getAttributes());
+            // new_call->setAttributes(call->getAttributes());
 
             Type * result_type = call->getType();
             if (!result_type->isVoidTy())
@@ -698,6 +696,7 @@ namespace
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME)
             	return;
 
+            // db(F->getName());
             std::map<BasicBlock *, int> bb_id_map;
 
             std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
