@@ -251,7 +251,8 @@ namespace
 
             // Reconstruct the AttributesList based on the vector we constructed.
             AttributeSet NewPAL = AttributeSet::get(func->getContext(), AttributesVec);
-            func->setAttributes(NewPAL);
+            // func->setAttributes(NewPAL);
+            func->setAttributes(AttributeSet());
 
         }
         std::pair<Value *, bool>  mapValue(Value * value, ValueDuplicateMap & map)
