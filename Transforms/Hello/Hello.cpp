@@ -105,7 +105,7 @@ namespace
         int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
-	    GlobalVariable *last_cftss_id;
+	    // GlobalVariable *last_cftss_id;
         GlobalVariable *cftss_array;
         GlobalVariable *cftss_array_pos;
         GlobalVariable *cftss_array_n;
@@ -183,7 +183,7 @@ namespace
             /* Modify function type to reflect duplicated arguments, muxed return type */
             FunctionType * type = func->getFunctionType();
             Type * return_type = type->getReturnType();
-            const AttributeSet &PAL = func->getAttributes();
+            // const AttributeSet &PAL = func->getAttributes();
 
             std::vector<Type *> arg_types;
             for each_custom(arg_type, *type, param_begin, param_end)
@@ -221,37 +221,37 @@ namespace
             }
             
             // The existing function return attributes.
-            SmallVector<AttributeSet, 8> AttributesVec;
+            // SmallVector<AttributeSet, 8> AttributesVec;
 
-            //Push empty attribute set for Return Index because the older attributes may not be valid anymore
-            AttributesVec.pb(AttributeSet());
+            // //Push empty attribute set for Return Index because the older attributes may not be valid anymore
+            // AttributesVec.pb(AttributeSet());
                 
                 
-            // Construct the new parameter list from non-dead arguments. Also construct
-            // a new set of parameter attributes to correspond. Skip the first parameter
-            // attribute, since that belongs to the return value.
-            unsigned i = 0;
-            // unsigned size = 0;
-            for (Function::arg_iterator I = func->arg_begin(), E = func->arg_end();
-            I != E; ++I, ++i)
-            {
-                // Get the original parameter attributes (skipping the first one, that is
-                // for the return value.
-                // Push the attributes twice to reflect the fact that the
-                // arguments have been duplicated.
-                AttributeSet temp = PAL.getParamAttributes(i+1);
-                AttributesVec.push_back(temp);
-                AttributesVec.push_back(temp);
-            }
+            // // Construct the new parameter list from non-dead arguments. Also construct
+            // // a new set of parameter attributes to correspond. Skip the first parameter
+            // // attribute, since that belongs to the return value.
+            // unsigned i = 0;
+            // // unsigned size = 0;
+            // for (Function::arg_iterator I = func->arg_begin(), E = func->arg_end();
+            // I != E; ++I, ++i)
+            // {
+            //     // Get the original parameter attributes (skipping the first one, that is
+            //     // for the return value.
+            //     // Push the attributes twice to reflect the fact that the
+            //     // arguments have been duplicated.
+            //     AttributeSet temp = PAL.getParamAttributes(i+1);
+            //     AttributesVec.push_back(temp);
+            //     AttributesVec.push_back(temp);
+            // }
 
-            // Push the Function attributes
-            if (PAL.hasAttributes(AttributeSet::FunctionIndex))
-                AttributesVec.push_back(AttributeSet::get(func->getContext(),
-                                          PAL.getFnAttributes()));
+            // // Push the Function attributes
+            // if (PAL.hasAttributes(AttributeSet::FunctionIndex))
+            //     AttributesVec.push_back(AttributeSet::get(func->getContext(),
+            //                               PAL.getFnAttributes()));
 
-            // Reconstruct the AttributesList based on the vector we constructed.
-            AttributeSet NewPAL = AttributeSet::get(func->getContext(), AttributesVec);
-            // func->setAttributes(NewPAL);
+            // // Reconstruct the AttributesList based on the vector we constructed.
+            // // AttributeSet NewPAL = AttributeSet::get(func->getContext(), AttributesVec);
+            // // func->setAttributes(NewPAL);
             func->setAttributes(AttributeSet());
 
         }
@@ -482,8 +482,13 @@ namespace
 			        return BinaryOperator::Create(op, input1, input2, name, insertBefore);
 		    }
 		}
-        Value * createCFCSSChecks(std::vector<int> possible_values,
-            Instruction * insertBefore, int current_basicblock_id, const Twine & name = "")
+        Value * createCFCSSChecks(
+                                    std::vector<int> possible_values,
+                                    Instruction * insertBefore, 
+                                    int current_basicblock_id, 
+                                    Value *last_cftss_id,
+                                    const Twine & name = ""
+                                )
         {
             std::vector<Value *> res;
             Value *loaded_cftss_id = new LoadInst(last_cftss_id, "", insertBefore);
@@ -641,26 +646,23 @@ namespace
             FORN(i, sz(cftss_block))
                 cftss_block[i]->insertBefore(insertionPoint);
 
-            // loaded_cftss_array_pos->insertBefore();
-            // sext_cftss_array_pos->insertAfter(loaded_cftss_array_pos);
-            // get_element_ptr_inst->insertAfter(sext_cftss_array_pos);
-            // store_inst->insertAfter(get_element_ptr_inst);
-            // increment->insertAfter(store_inst);
-            // mod_instruction->insertAfter(increment);
-
-
-
-            new StoreInst (tobestoredval, last_cftss_id, bb->getTerminator());
         }
         void trackBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
+
             trackBasicBlock(root->getBlock(), bb_id_map);
 
             for each(child, *root)
                 trackBlockTree(*child, bb_id_map);
         }
-        void controlFlowCheckBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
+        void controlFlowCheckBasicBlock(BasicBlock *bb, Value *last_cftss_id, std::map<BasicBlock *, int> &bb_id_map)
         {
+            Value *tobestoredval   = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
+            BasicBlock::iterator I = bb->begin();
+            while (isPhi(I) || I==last_cftss_id) ++I;
+
+            new StoreInst (tobestoredval, last_cftss_id, I);
+
             std::vector<int> possible_values;
             for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
             {
@@ -674,17 +676,18 @@ namespace
                         possible_values, 
                         bb->getFirstInsertionPt(), 
                         get_value_from_map(bb, bb_id_map), 
+                        last_cftss_id,
                         makeName(bb, "_cfcss_checks")
                     );
             }
         }
-        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
+        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *last_cftss_id, std::map<BasicBlock *, int> bb_id_map)
         {
             assert((QEDMode == CFCSS || QEDMode == ALL) && "This mode shouldn't use CFCSS");
-            controlFlowCheckBasicBlock(root->getBlock(), bb_id_map);
+            controlFlowCheckBasicBlock(root->getBlock(), last_cftss_id, bb_id_map);
 
             for each(child, *root)
-                controlFlowCheckBlockTree(*child, bb_id_map);
+                controlFlowCheckBlockTree(*child, last_cftss_id, bb_id_map);
         }
         void printName(Value *v)
         {
@@ -755,7 +758,11 @@ namespace
                 trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
             if (QEDMode >= CFCSS)
-                controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+            {
+                BasicBlock &entry = F->getEntryBlock();
+                Instruction *last_cftss_id = new AllocaInst (Type::getInt32Ty(context), 0, "LAST_CFTSS_ID", entry.getFirstInsertionPt());
+                controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), last_cftss_id, bb_id_map);
+            }
 
         }
         Constant * createStringConstant(const std::string & string)
@@ -817,12 +824,14 @@ namespace
 
             std::vector<Value *> v;
             createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
-            if (QEDMode == ALL)
-            {
-                Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
-                v.pb(loadres);
-                createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
-            }
+
+            // TODO: Change this so that it can print the array rather than just the last cftss ID.
+            // if (QEDMode == ALL)
+            // {
+            //     Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
+            //     v.pb(loadres);
+            //     createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
+            // }
             createExitCall(one, bb3, &module);
             BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
             branchinst = BranchInst::Create(bb2, bb3);
@@ -972,15 +981,6 @@ namespace
                 FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
                     temp.pb(i32_zero);
 
-                last_cftss_id = new GlobalVariable
-                                            (
-                                                M, 
-                                                i32, 
-                                                false, 
-                                                GlobalValue::PrivateLinkage, 
-                                                i32_zero, 
-                                                "LAST_CFTSS_ID"
-                                            );
                 cftss_array = new GlobalVariable
                                             (  
                                                 M, 
