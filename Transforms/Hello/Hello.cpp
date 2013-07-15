@@ -228,7 +228,7 @@ namespace
         }
         void modifyPrototype(Function * func, ValueDuplicateMap & map)
         {
-            /* Modify function type to reflect duplicated arguments, muxed return type */
+            // Modify function type to reflect duplicated arguments, muxed return type
             FunctionType * type = func->getFunctionType();
             Type * return_type = type->getReturnType();
             // const AttributeSet &PAL = func->getAttributes();
@@ -787,14 +787,19 @@ namespace
             errs()<<v->getName()<<"\n";
         }
 
-        void cloneFunction(Function *F, ValueDuplicateMap & global_map, Module &M)
+
+        void mapFunctionBasicBlocks(Function *F, std::map<BasicBlock *, int> &bb_id_map, Module &M)
+        {
+            DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
+            mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+        }
+        void cloneFunction(Function *F, ValueDuplicateMap & global_map, std::map<BasicBlock *, int> &bb_id_map, Module &M)
         {
             //TODO: Can do better than this.
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME)
                 return;
 
-            // db(F->getName());
-            std::map<BasicBlock *, int> bb_id_map;
+            // db(F->getName());;
 
             std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
             toBeReplaced.clear();
@@ -803,9 +808,7 @@ namespace
             ValueDuplicateMap map;
             map.insert(global_map.begin(), global_map.end());
 
-            //TODO:Comment
-            //TODO: Use valueDuplicateMap instead bb_id_map
-            mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+            // mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
 
 
@@ -1194,6 +1197,17 @@ namespace
                 return false;
             return true;
         }
+        std::vector<int> returnCallers(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            std::vector<int> res;
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                res.pb(get_value_from_map(Call->getParent(), bb_id_map));
+            }
+            return res;
+        }
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -1236,6 +1250,7 @@ namespace
                 // cftss_id->setThreadLocal(true);
             }
 
+
             if (supportsEDDI(QEDMode))
                 createEDDICheckFunction(M);
 
@@ -1251,10 +1266,25 @@ namespace
                     }
             }
 
+
+            std::map<BasicBlock *, int> bb_id_map;
+            FORE(iter, M)
+                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    mapFunctionBasicBlocks(iter, bb_id_map, M);
+
+            FORE(iter, M)
+                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                {
+                    std::vector<int> temp = returnCallers(iter, bb_id_map);
+                    // db(iter->getName());
+                    // FORN(i, sz(temp))
+                    //     db(temp[i]);
+                }
+
             // Iterate over all the functions and clone them
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                    cloneFunction(iter, map, M);
+                    cloneFunction(iter, map, bb_id_map, M);
 
             return true;
         }
