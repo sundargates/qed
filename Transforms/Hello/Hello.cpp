@@ -65,6 +65,7 @@ enum QEDLevel
 {
     EDDI,
     CFTSS,
+    EDDIANDCFTSS,
     CFCSS,
     ALL
 };
@@ -80,10 +81,18 @@ static cl::opt<QEDLevel> QEDMode
     (
         clEnumVal(EDDI , "Enable EDDI Transformations"),
         clEnumVal(CFTSS, "Enable CFTSS Transformations"),
+        clEnumVal(EDDIANDCFTSS, "Enable both EDDI and CFTSS Transformations"),
         clEnumVal(CFCSS, "Enable CFCSS Transformations"),
         clEnumVal(ALL,   "Enable All Transformations"),
         clEnumValEnd
     )
+);
+
+static cl::opt<int> NUM_ELEMENTS_IN_CFTSS_ARRAY
+(
+    "NUM-CFTSS-BB",
+    cl::init(10),
+    cl::desc("Choose the number of basic blocks that you want to track")
 );
 
 namespace
@@ -95,17 +104,17 @@ namespace
         Value *one;
         LLVMContext & context;
         IntegerType * i1;
-	    IntegerType * i8;
-	    IntegerType * i32;
+        IntegerType * i8;
+        IntegerType * i32;
         IntegerType * i64;
-	    ConstantInt * i1_true;
-	    ConstantInt * i1_false;
-	    ConstantInt * i32_zero;
-	    int currentBasicBlock;
-        int NUM_ELEMENTS_IN_CFTSS_ARRAY;
+        ConstantInt * i1_true;
+        ConstantInt * i1_false;
+        ConstantInt * i32_zero;
+        int currentBasicBlock;
+        // int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
-	    // GlobalVariable *last_cftss_id;
+        // GlobalVariable *last_cftss_id;
         GlobalVariable *cftss_array;
         GlobalVariable *cftss_array_pos;
         GlobalVariable *cftss_array_n;
@@ -130,7 +139,39 @@ namespace
             EDDI_CHECK_FUNCTION_NAME    = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME   = "cfcss_check_function";
             
-            NUM_ELEMENTS_IN_CFTSS_ARRAY = 10;
+            // db(NUM_CFTSS_BB);
+            // NUM_ELEMENTS_IN_CFTSS_ARRAY = NUM_CFTSS_BB;
+            // db(NUM_ELEMENTS_IN_CFTSS_ARRAY);
+        }
+        bool supportsEDDI(QEDLevel QEDMode)
+        {
+            if(QEDMode==EDDI)
+                return true;
+            if(QEDMode==EDDIANDCFTSS)
+                return true;
+            if(QEDMode==ALL)
+                return true;
+            return false;
+        }
+        bool supportsCFTSS(QEDLevel QEDMode)
+        {
+            if(QEDMode==CFTSS)
+                return true;
+            if(QEDMode==EDDIANDCFTSS)
+                return true;
+            if(QEDMode==CFCSS)
+                return true;
+            if(QEDMode==ALL)
+                return true;
+            return false;
+        }
+        bool supportsCFCSS(QEDLevel QEDMode)
+        {
+            if(QEDMode==CFCSS)
+                return true;
+            if(QEDMode==ALL)
+                return true;
+            return false;
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
@@ -142,42 +183,49 @@ namespace
                     && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
                     && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME);
         }
-		unsigned bitWidth(Type * type)
-		{
-			return type->isPointerTy() ? 32 : type->getPrimitiveSizeInBits();
-		}
+        unsigned bitWidth(Type * type)
+        {
+            return type->isPointerTy() ? 32 : type->getPrimitiveSizeInBits();
+        }
 
         void cloneGlobal(GlobalVariable * global, Module &M, ValueDuplicateMap & map)
-		{
-			std::string name = makeName(global, "_dup");
-			PointerType * type = global->getType();
-			GlobalVariable *global_dup = new GlobalVariable
+        {
+            // db(global->getName());
+            std::string name = makeName(global, "_dup");
+            PointerType * type = global->getType();
+            GlobalVariable *global_dup = new GlobalVariable
             (
-				M,
-				type->getElementType(),
-				global->isConstant(),
-				global->getLinkage(),
-				global->getInitializer(),
-				name,
-				global,
-				global->getThreadLocalMode(),
-				type->getAddressSpace()
-			);
-			
-			global_dup->copyAttributesFrom(global);
-			map[global] = global_dup;
-		}
-		void cloneGlobalVariables(Module &M, ValueDuplicateMap & map)
-		{
-			for (Module::global_iterator I = M.global_begin(), E = M.global_end(); I != E; ++I)
-			{
-				// Ignore all 'special' globals.
+                M,
+                type->getElementType(),
+                global->isConstant(),
+                global->getLinkage(),
+                global->getInitializer(),
+                name,
+                global,
+                global->getThreadLocalMode(),
+                type->getAddressSpace()
+            );
+            
+            global_dup->copyAttributesFrom(global);
+            map[global] = global_dup;
+        }
+        void cloneGlobalVariables(Module &M, ValueDuplicateMap & map)
+        {
+            for (Module::global_iterator I = M.global_begin(), E = M.global_end(); I != E; ++I)
+            {
+                // Ignore all 'special' globals.
                 // db(I->getName());
-				if (I->getName().startswith("llvm.") || I->getName().startswith(".llvm.") || I->getName().startswith("__"))
-					continue;
-				cloneGlobal(I, M, map);
-			}
-		}
+                if (
+                        I->getName().startswith("llvm.") 
+                        || I->getName().startswith(".llvm.") 
+                        || I->getName().startswith("__")
+                        || I->getName().startswith("__")
+                        || !I->hasInitializer()
+                    )
+                    continue;
+                cloneGlobal(I, M, map);
+            }
+        }
         void modifyPrototype(Function * func, ValueDuplicateMap & map)
         {
             /* Modify function type to reflect duplicated arguments, muxed return type */
@@ -188,21 +236,21 @@ namespace
             std::vector<Type *> arg_types;
             for each_custom(arg_type, *type, param_begin, param_end)
             {
-				arg_types.push_back(*arg_type);
-				arg_types.push_back(*arg_type);
+                arg_types.push_back(*arg_type);
+                arg_types.push_back(*arg_type);
             }
 
             Type * new_return_type = return_type;
             if (return_type->isVoidTy())
-				new_return_type = Type::getVoidTy(context);
+                new_return_type = Type::getVoidTy(context);
             else
-			{
-				std::vector<Type*> RetTypes;
-				Type *dup_return_type = return_type;
-				RetTypes.pb(return_type);
-				RetTypes.pb(dup_return_type);
-				new_return_type = StructType::get(context, RetTypes, true);
-			}
+            {
+                std::vector<Type*> RetTypes;
+                Type *dup_return_type = return_type;
+                RetTypes.pb(return_type);
+                RetTypes.pb(dup_return_type);
+                new_return_type = StructType::get(context, RetTypes, true);
+            }
 
             FunctionType * new_type = FunctionType::get(new_return_type, arg_types, type->isVarArg());
             unsigned address_space = func->getType()->getAddressSpace();
@@ -295,11 +343,11 @@ namespace
             // Instruction * instruction = dyn_cast<Instruction>(value);
             // if(instruction)
             // {
-            // 	instruction->dump();
-            // 	Instruction *NI = instruction->clone();
-            // 	map[instruction] = NI;
-            // 	mapOperands(NI, map);
-            // 	return NI;
+            //     instruction->dump();
+            //     Instruction *NI = instruction->clone();
+            //     map[instruction] = NI;
+            //     mapOperands(NI, map);
+            //     return NI;
             // }
             // value->dump();
             // errs()<<"The above operand does not have a replacement?\n";
@@ -307,7 +355,7 @@ namespace
         }
         bool isCloneable(Instruction *inst)
         {
-        	bool success = true;
+            bool success = true;
             success &= !isa<TerminatorInst>(inst);
             // success &= !isa<PHINode>(inst);
 
@@ -319,7 +367,7 @@ namespace
         }
         bool isPhi(Instruction *inst)
         {
-        	bool success = true;
+            bool success = true;
             success &= isa<PHINode>(inst);
             return success;
         }
@@ -337,9 +385,9 @@ namespace
         }
         bool isCallable(Value *inst)
         {
-        	CallInst *call = dyn_cast<CallInst>(inst);
-        	if(call)
-            	return true;
+            CallInst *call = dyn_cast<CallInst>(inst);
+            if(call)
+                return true;
             return false;
         }
         bool isAllocable(Instruction *inst)
@@ -350,14 +398,14 @@ namespace
         {
             for each_custom(operand, *instr, op_begin, op_end)
             {
-            	std::pair<Value *, bool> t = mapValue(*operand, map);
+                std::pair<Value *, bool> t = mapValue(*operand, map);
                 *operand = t.first;
                 if(!t.second && !isCallable(*operand))
                 {
-                	Value *temp  = *operand;
-                	std::pair<Instruction *, Value *> V = mp(instr, temp);
-                	toBeReplaced.pb(V);
-                	// db("PUSHED");
+                    Value *temp  = *operand;
+                    std::pair<Instruction *, Value *> V = mp(instr, temp);
+                    toBeReplaced.pb(V);
+                    // db("PUSHED");
                 }
             }
         }
@@ -385,25 +433,25 @@ namespace
                 return false;
             return true;
         }
-    	std::string makeName(Value * value, const char * suffix)
-    	{
-    		return value->hasName() ? value->getName().str() + suffix : std::string();
-    	}
-    	Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
-    	{
-    			module->getOrInsertFunction(name, type);
-    			Function * function = module->getFunction(name);
-    			assert(function);
-    			return function;
-    	}
-    	CallInst * createExitCall(Value * status, BasicBlock * block, Module * module)
-    	{
-    			FunctionType * exit_type = FunctionType::get(Type::getVoidTy(context), Type::getInt32Ty(context), false);
-    			Function * exit_func = getExternalFunction("exit", exit_type, module);
-    			CallInst * call = CallInst::Create(exit_func, status, "", block);
-    			call->setDoesNotThrow();
-    			return call;
-    	}
+        std::string makeName(Value * value, const char * suffix)
+        {
+            return value->hasName() ? value->getName().str() + suffix : std::string();
+        }
+        Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
+        {
+                module->getOrInsertFunction(name, type);
+                Function * function = module->getFunction(name);
+                assert(function);
+                return function;
+        }
+        CallInst * createExitCall(Value * status, BasicBlock * block, Module * module)
+        {
+                FunctionType * exit_type = FunctionType::get(Type::getVoidTy(context), Type::getInt32Ty(context), false);
+                Function * exit_func = getExternalFunction("exit", exit_type, module);
+                CallInst * call = CallInst::Create(exit_func, status, "", block);
+                call->setDoesNotThrow();
+                return call;
+        }
 //         Duplicate all call instruction parameters, demux the return value
 //         Depends on muxFunction being called on all functions to produce the function type map
         void modifyCallInstruction(CallInst *call, ValueDuplicateMap & map, std::vector<CallInst *> & toBeRemoved)
@@ -422,66 +470,84 @@ namespace
             Type * result_type = call->getType();
             if (!result_type->isVoidTy())
             {
-				Value *result =  ExtractValueInst::Create (new_call, 0, "", call);
-				Value *result_dup =  ExtractValueInst::Create (new_call, 1, "", call);
-				call->replaceAllUsesWith(result);
-				map[result] = result_dup;
+                Value *result =  ExtractValueInst::Create (new_call, 0, "", call);
+                Value *result_dup =  ExtractValueInst::Create (new_call, 1, "", call);
+                call->replaceAllUsesWith(result);
+                map[result] = result_dup;
             }
             toBeRemoved.pb(call);
         }
         void muxReturnInst(ReturnInst * ret, ValueDuplicateMap & map)
         {
-			Value *value = ret->getReturnValue();
-			Value *value_dup = mapValue(value, map).first;
-			std::vector< Value * > V;
-			std::vector< Type * > Elements;
-			V.push_back(value);
-			V.push_back(value_dup);
-			
-			Elements.push_back(value->getType());
-			Elements.push_back(value_dup->getType());
-			Type *type = StructType::get(context, Elements, true);
-			AllocaInst *ptr = new AllocaInst (type, 0, "", ret);
-			Instruction *str = new LoadInst(ptr, "", ret);
-			str = InsertValueInst::Create(str, value, 0, "", ret);
-			str = InsertValueInst::Create(str, value_dup, 1, "", ret);
-			
-			ret->setOperand(0, str);
+            Value *value = ret->getReturnValue();
+            Value *value_dup = mapValue(value, map).first;
+            std::vector< Value * > V;
+            std::vector< Type * > Elements;
+            V.push_back(value);
+            V.push_back(value_dup);
+            
+            Elements.push_back(value->getType());
+            Elements.push_back(value_dup->getType());
+            Type *type = StructType::get(context, Elements, true);
+            AllocaInst *ptr = new AllocaInst (type, 0, "", ret);
+            Instruction *str = new LoadInst(ptr, "", ret);
+            str = InsertValueInst::Create(str, value, 0, "", ret);
+            str = InsertValueInst::Create(str, value_dup, 1, "", ret);
+            
+            ret->setOperand(0, str);
         }
         bool remapOperand(Instruction *instr, Value *old_value, Value *new_value)
         {
-        	for each_custom(operand, *instr, op_begin, op_end)
-				if(*operand == old_value)
-				{
-	    			*operand = new_value;
-	    			return true;
-	    		}
-    		return false;
+            for each_custom(operand, *instr, op_begin, op_end)
+                if(*operand == old_value)
+                {
+                    *operand = new_value;
+                    return true;
+                }
+            return false;
         }
         Instruction *getNextInstruction(Instruction *inst)
         {
-        	BasicBlock::iterator iter = inst;
+            BasicBlock::iterator iter = inst;
             Instruction *nextInstruction = ++iter;
             if(nextInstruction==inst->getParent()->end())
-            	return NULL;
+                return NULL;
             return nextInstruction;
         }
         Value * createReduction(Instruction::BinaryOps op, ArrayRef<Value *> inputs, Instruction * insertBefore, const Twine & name = "")
-		{
-		    size_t size = inputs.size();
-		    switch (size)
-		    {
-			    case 0:
-			        return NULL;
-			    case 1:
-			        return inputs[0];
-			    default:
-			        size_t middle = size / 2;
-			        Value * input1 = createReduction(op, inputs.slice(0, middle), insertBefore);
-			        Value * input2 = createReduction(op, inputs.slice(middle), insertBefore);
-			        return BinaryOperator::Create(op, input1, input2, name, insertBefore);
-		    }
-		}
+        {
+            size_t size = inputs.size();
+            switch (size)
+            {
+                case 0:
+                    return NULL;
+                case 1:
+                    return inputs[0];
+                default:
+                    size_t middle = size / 2;
+                    Value * input1 = createReduction(op, inputs.slice(0, middle), insertBefore);
+                    Value * input2 = createReduction(op, inputs.slice(middle), insertBefore);
+                    assert(!input1->getType()->isVectorTy() && "Vectors cannot be reduced");
+                    assert(!input2->getType()->isVectorTy() && "Vectors cannot be reduced");
+
+                    assert(!input1->getType()->isPointerTy() && "Pointers shouldn't be compared");
+                    assert(!input2->getType()->isPointerTy() && "Pointers shouldn't be compared");
+                    // errs() <<"\n\n";
+                    // input1->getType()->dump();errs()<<"\t";
+                    // input2->getType()->dump();
+                    // if(input1->getType()->isVectorTy())
+                    // {
+                    //     assert(input1->getType()->getVectorElementType()==i1);
+                    //     // Value *temp = createReduction()
+                    // }
+                    // if(input2->getType()->isVectorTy())
+                    // {
+                    //     assert(input1->getType()->getVectorElementType()==i1);
+                    //     assert(false);
+                    // }
+                    return BinaryOperator::Create(op, input1, input2, name, insertBefore);
+            }
+        }
         Value * createCFCSSChecks(
                                     std::vector<int> possible_values,
                                     Instruction * insertBefore, 
@@ -513,9 +579,37 @@ namespace
             }
             return bb_id_map[bb];
         }
-        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
-        	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
+        bool needsToBeChecked (Instruction *I)
         {
+            // I->mayReturn() 
+            //             && hasOutput(I) 
+            //             && !isPhi(I) 
+            //             && !isGetElementPtrInst(I) 
+            //             && !isCastInst(I)
+            //             %% !
+
+            if(!I->mayReturn())
+                return false;
+            if(!hasOutput(I))
+                return false;
+            if(isGetElementPtrInst(I))
+                return false;
+            if(isPhi(I))
+                return false;
+            if(I->getType()->isPointerTy())
+                return false;
+            if(isCastInst(I))
+                return false;
+            if(I->getType()->isVectorTy())
+                return false;
+
+            return true;
+
+        }
+        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
+            std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
+        {
+            // db(bb->getName());
             std::string bbname = bb->getName();
             Instruction *I; Instruction *NI;
             std::vector<CallInst *> toBeRemoved;
@@ -527,8 +621,8 @@ namespace
                 // iter->dump();
                 if(skip)
                 {
-                	skip --;
-                	continue;
+                    skip --;
+                    continue;
                 }
                 if(previous)
                 {
@@ -545,21 +639,20 @@ namespace
                 else
                 if(isCloneable(iter))
                 {
-                	// iter->dump();
+                    // iter->dump();
                     I = iter;
                     NI = I->clone();
                     mapOperands(NI, map, toBeReplaced);
                     map[I] = NI;
                     if(I->hasName())
-                    	NI->setName(makeName(I, "_dup"));
+                        NI->setName(makeName(I, "_dup"));
                     NI->insertAfter(I);
                     skip++;
 
-                    //TODO: have to change this to support only instructions that need to validated with EDDI
-                    if(I->mayReturn() && hasOutput(I) && !isPhi(I) && !isGetElementPtrInst(I) && !isCastInst(I))
-                        previous = true;
+                    if(needsToBeChecked(I))
+                            previous = true;
                 }
-	        }
+            }
             FORN(i, sz(toBeRemoved))
             {
                 CallInst *temp = toBeRemoved[i];
@@ -568,14 +661,14 @@ namespace
 
             if(sz(createdCheckInsts))
             {
-            	Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
-            	CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
+                Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
+                CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
 
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, 
             ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
-        	std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
+            std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             cloneBasicBlock(root->getBlock(), function, M, map, bb_id_map, toBeReplaced);
             for each(child, *root)
@@ -636,7 +729,7 @@ namespace
             Instruction *mod_instruction      = BinaryOperator::Create(Instruction::URem, increment, ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY));
             cftss_block.pb(mod_instruction);
             
-            Instruction *final_store          = new StoreInst (mod_instruction, get_element_ptr_inst);
+            Instruction *final_store          = new StoreInst (mod_instruction, cftss_array_pos);
             cftss_block.pb(final_store);
 
 
@@ -683,7 +776,7 @@ namespace
         }
         void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *last_cftss_id, std::map<BasicBlock *, int> bb_id_map)
         {
-            assert((QEDMode == CFCSS || QEDMode == ALL) && "This mode shouldn't use CFCSS");
+            assert(supportsCFCSS(QEDMode) && "This mode shouldn't use CFCSS");
             controlFlowCheckBasicBlock(root->getBlock(), last_cftss_id, bb_id_map);
 
             for each(child, *root)
@@ -698,7 +791,7 @@ namespace
         {
             //TODO: Can do better than this.
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME)
-            	return;
+                return;
 
             // db(F->getName());
             std::map<BasicBlock *, int> bb_id_map;
@@ -718,7 +811,7 @@ namespace
 
 
             //This is EDDI-V essentially.
-            if(QEDMode == EDDI || QEDMode == ALL)
+            if(supportsEDDI(QEDMode))
             {
 
                 // EDDI_V!
@@ -753,11 +846,11 @@ namespace
 
 
 
-            //TODO: Comment
-            if (QEDMode >= CFTSS)
+            // Start allocating IDs to basic blocks if the user expects CFTSS
+            if (supportsCFTSS(QEDMode))
                 trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
-            if (QEDMode >= CFCSS)
+            if (supportsCFCSS(QEDMode))
             {
                 BasicBlock &entry = F->getEntryBlock();
                 Instruction *last_cftss_id = new AllocaInst (Type::getInt32Ty(context), 0, "LAST_CFTSS_ID", entry.getFirstInsertionPt());
@@ -766,83 +859,215 @@ namespace
 
         }
         Constant * createStringConstant(const std::string & string)
-	    {
-	        std::vector<Constant *> necklace;
-	        for each(character, string)
-	        {
-	            necklace.push_back(ConstantInt::get(i8, *character));
-	        }
-	        return ConstantArray::get(ArrayType::get(i8, string.size()), necklace);
-	    }
+        {
+            std::vector<Constant *> necklace;
+            for each(character, string)
+            {
+                necklace.push_back(ConstantInt::get(i8, *character));
+            }
+            return ConstantArray::get(ArrayType::get(i8, string.size()), necklace);
+        }
 
-	    // Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
-	    // {
-	    //     module->getOrInsertFunction(name, type);
-	    //     Function * function = module->getFunction(name);
-	    //     assert(function);
-	    //     return function;
-	    // }
+        // Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
+        // {
+        //     module->getOrInsertFunction(name, type);
+        //     Function * function = module->getFunction(name);
+        //     assert(function);
+        //     return function;
+        // }
 
-	    CallInst * createPrintfCall(Twine format_name, const std::string & format_val,
-	                                ArrayRef<Value *> args, BasicBlock * block, Module * module)
-	    {
-	        /* Get printf function, adding declaration if needed */
-	        FunctionType * printf_type = FunctionType::get(i32, PointerType::get(i8, 0), true);
-	        Function * printf_func = getExternalFunction("printf", printf_type, module);
+        CallInst * createPrintfCall(Twine format_name, const std::string & format_val,
+                                    ArrayRef<Value *> args, BasicBlock * block, Module * module)
+        {
+            /* Get printf function, adding declaration if needed */
+            FunctionType * printf_type = FunctionType::get(i32, PointerType::get(i8, 0), true);
+            Function * printf_func = getExternalFunction("printf", printf_type, module);
 
-	        /* Add global string constant for format */
-	        Constant * format_data = createStringConstant(format_val);
-	        GlobalVariable * format = new GlobalVariable(format_data->getType(), true, GlobalValue::PrivateLinkage,
-	                                                     format_data, format_name);
-	        format->setUnnamedAddr(true);
-	        format->setAlignment(1);
-	        module->getGlobalList().push_back(format);
+            /* Add global string constant for format */
+            Constant * format_data = createStringConstant(format_val);
+            GlobalVariable * format = new GlobalVariable(format_data->getType(), true, GlobalValue::PrivateLinkage,
+                                                         format_data, format_name);
+            format->setUnnamedAddr(true);
+            format->setAlignment(1);
+            module->getGlobalList().push_back(format);
 
-	        /* Build argument list */
-	        std::vector<Value *> arg_list;
-	        Value * zero_zero[] = { i32_zero, i32_zero };
-	        arg_list.push_back(ConstantExpr::getInBoundsGetElementPtr(format, zero_zero));
-	        arg_list.insert(arg_list.end(), args.begin(), args.end());
+            /* Build argument list */
+            std::vector<Value *> arg_list;
+            Value * zero_zero[] = { i32_zero, i32_zero };
+            arg_list.push_back(ConstantExpr::getInBoundsGetElementPtr(format, zero_zero));
+            arg_list.insert(arg_list.end(), args.begin(), args.end());
 
-	        CallInst * call = CallInst::Create(printf_func, arg_list, "", block);
-	        call->setDoesNotThrow();
-	        return call;
-	    }
+            CallInst * call = CallInst::Create(printf_func, arg_list, "", block);
+            call->setDoesNotThrow();
+            return call;
+        }
         void createEDDICheckFunction(Module &module)
         {
+            assert(supportsEDDI(QEDMode));
+
             std::vector<Type*> Params;
+            std::vector<Value *> temp;
+
+
             Params.pb(Type::getInt1Ty(context));
+
             llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
             module.getOrInsertFunction(EDDI_CHECK_FUNCTION_NAME, ftype);
-            // Function * realFunc = dyn_cast<Function *>(func);
+
             EDDICheckFunction = module.getFunction(EDDI_CHECK_FUNCTION_NAME);
             Argument *check_value = &EDDICheckFunction->getArgumentList().front();
-        	
-            BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", EDDICheckFunction);
-            BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", EDDICheckFunction);
-            BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", EDDICheckFunction);
+            
+            BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", EDDICheckFunction);
+            BasicBlock* bb1   = llvm::BasicBlock::Create(context, "check_block", EDDICheckFunction);
+            BasicBlock* bb2   = llvm::BasicBlock::Create(context, "return_block", EDDICheckFunction);
+            BasicBlock* bb3   = llvm::BasicBlock::Create(context, "exit_block", EDDICheckFunction);
 
-            std::vector<Value *> v;
-            createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
+            Value *i_iter;
 
-            // TODO: Change this so that it can print the array rather than just the last cftss ID.
-            // if (QEDMode == ALL)
-            // {
-            //     Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
-            //     v.pb(loadres);
-            //     createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
-            // }
-            createExitCall(one, bb3, &module);
-            BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
-            branchinst = BranchInst::Create(bb2, bb3);
+            //entry:
+            {
+                BasicBlock *currentBasicBlock = entry;
+                Instruction *i_alloc = new AllocaInst (i32, i32_zero, "i", currentBasicBlock);
+                i_iter = i_alloc;
+                new StoreInst(i32_zero, i_alloc, currentBasicBlock);
+                BranchInst::Create(bb1, currentBasicBlock);
+            }
+            // check_block:
+            {
+                BranchInst::Create(bb3, bb2, check_value, bb1); // BB1->BB2 or BB3
+            }
 
-            llvm::ReturnInst::Create(context, 0, bb2);
+            // return_block:                                     ; preds = %for.end, %check_block
+            //     ret void
+
+            // return_block:
+                ReturnInst::Create(context, 0, bb2);
+
+            // exit_block:
+                std::vector<Value *> v; v.clear();
+                createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
+
+            // If CFTSS is supported, we can print the last N basic blocks that got executed
+            if(supportsCFTSS(QEDMode))
+            {
+                BasicBlock* bb4 = llvm::BasicBlock::Create(context, "for.cond", EDDICheckFunction);
+                BasicBlock* bb5 = llvm::BasicBlock::Create(context, "for.body", EDDICheckFunction);
+                BasicBlock* bb6 = llvm::BasicBlock::Create(context, "for.inc", EDDICheckFunction);
+                BasicBlock* bb7 = llvm::BasicBlock::Create(context, "for.end", EDDICheckFunction);
+
+                // Basic Block 3 LLVM IR code:
+                // This is where the control gets into if EDDI check fails. 
+                // We basically want to print all the basic blocks list in this place.
+
+                // exit_block: 
+                //     %i = alloca i32, align 4
+                //     store i32 0, i32* %i, align 4
+                //     br label %for.cond
+
+                // for.cond:                                         ; preds = %for.inc, %entry
+                //     %0 = load i32* %i, align 4
+                //     %cmp = icmp slt i32 %0, 10
+                //     br i1 %cmp, label %for.body, label %for.end
+
+                // for.body:                                         ; preds = %for.cond
+                //     %1 = load i32* @temp, align 4
+                //     %idxprom = sext i32 %1 to i64
+                //     %arrayidx = getelementptr inbounds [100 x i32]* @array, i32 0, i64 %idxprom
+                //     %2 = load i32* %arrayidx, align 4
+                //     %call = call i32 (i8*, ...)* @printf(i8* getelementptr inbounds ([4 x i8]* @.str, i32 0, i32 0), i32 %2)
+                //     br label %for.inc
+
+                // for.inc:                                          ; preds = %for.body
+                //     %3 = load i32* %i, align 4
+                //     %inc = add nsw i32 %3, 1
+                //     store i32 %inc, i32* %i, align 4
+                //     %4 = load i32* @temp, align 4
+                //     %inc1 = add nsw i32 %4, 1
+                //     store i32 %inc1, i32* @temp, align 4
+                //     %5 = load i32* @temp, align 4
+                //     %rem = srem i32 %5, 10
+                //     store i32 %rem, i32* @temp, align 4
+                //     br label %for.cond
+
+                // for.end:                                          ; preds = %for.cond
+                //     call void @exit(i32 1) #2
+                //     br label %return_block
 
 
+                // exit_block:
+                {
+                    Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb3);
+                    Instruction *decrement              = BinaryOperator::Create(Instruction::Sub, loaded_cftss_array_pos, one, "dec", bb3);
+                    Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
+                                                    ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
+                    new StoreInst(mod_instruction, cftss_array_pos, bb3);
+                    BranchInst::Create(bb4, bb3);
+                }
+
+                // for.cond:
+                {
+                    Instruction *load_i = new LoadInst(i_iter, "", bb4);
+                    Instruction *cmp    = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, load_i, 
+                                            ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "cmp", bb4); 
+                    BranchInst::Create(bb5, bb7, cmp, bb4);// BB4->BB5 or BB7
+                }
+
+                //for.body:
+                {
+                    Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb5);
+                    Instruction *sext_cftss_array_pos   = new SExtInst(loaded_cftss_array_pos, i64, "idxprom", bb5);
+
+                    temp.clear();
+                    temp.pb(i32_zero);
+                    temp.pb(sext_cftss_array_pos);
+
+                    Instruction *get_element_ptr_inst   = GetElementPtrInst::CreateInBounds(cftss_array, temp, "arrayidx", bb5);
+                    Instruction *loaded_array_val       = new LoadInst(get_element_ptr_inst, "", bb5);
+
+                    Instruction *load_i = new LoadInst(i_iter, "", bb5);
+                    temp.clear();
+                    temp.pb(loaded_array_val);
+                    temp.pb(load_i);
+                    createPrintfCall("cfcssmessage1", "Basic Block ID = %d I = %d\n", temp, bb5, &module);
+                    BranchInst::Create(bb6, bb5);
+                }
+
+                //for.inc:
+                {
+                    Instruction *load_i                 = new LoadInst(i_iter, "", bb6);
+                    Instruction *increment              = BinaryOperator::Create(Instruction::Add, load_i, one, "inc", bb6);
+                    new StoreInst(increment, i_iter, bb6);
+                    Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb6);
+                    Instruction *decrement              = BinaryOperator::Create(Instruction::Sub, loaded_cftss_array_pos, one, "dec1", bb6);
+                    Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
+                                                    ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb6);
+                    new StoreInst(mod_instruction, cftss_array_pos, bb6);
+                    BranchInst::Create(bb4, bb6);
+                }
+
+                //for.end:
+                {
+                    createExitCall(one, bb7, &module);
+                    BranchInst::Create(bb2, bb7);
+                }
+
+                // if (QEDMode == ALL)
+                // {
+                //     Instruction *loadres = new LoadInst(last_cftss_id, "", bb3);
+                //     v.pb(loadres);
+                //     createPrintfCall("eddimessage2", "The last basic block that got executed was = %d\n", v, bb3, &module);
+                // }
+            }
+            else
+            {
+                createExitCall(one, bb3, &module);
+                BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
+                branchinst = BranchInst::Create(bb2, bb3);
+            }
         }
         void createCFCSSCheckFunction(Module &module)
         {
-            assert (QEDMode == ALL || QEDMode == CFCSS);
+            assert (supportsCFCSS(CFCSS) && "CFCSS Check Function shouldn't be created");
 
             std::vector<Type*> Params;
             std::vector<Value *> temp;
@@ -975,7 +1200,7 @@ namespace
             ValueDuplicateMap map;
             cloneGlobalVariables(M, map);
 
-            if (QEDMode >= CFTSS)
+            if (supportsCFTSS(QEDMode))
             {
                 std::vector<Constant *> temp;
                 FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
@@ -1011,13 +1236,13 @@ namespace
                 // cftss_id->setThreadLocal(true);
             }
 
-            if (QEDMode == EDDI || QEDMode == ALL)
+            if (supportsEDDI(QEDMode))
                 createEDDICheckFunction(M);
 
-            if (QEDMode >= CFCSS)
+            if (supportsCFCSS(QEDMode))
                 createCFCSSCheckFunction(M);
 
-            if (QEDMode == ALL || QEDMode == EDDI)
+            if (supportsEDDI(QEDMode))
             {
                 FORE(iter, M)
                     if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
@@ -1026,17 +1251,17 @@ namespace
                     }
             }
 
-            //TODO: Comment
+            // Iterate over all the functions and clone them
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, M);
 
             return true;
         }
-		void getAnalysisUsage(AnalysisUsage & info) const
-		{
-			info.addRequired<DominatorTree>();
-		}
+        void getAnalysisUsage(AnalysisUsage & info) const
+        {
+            info.addRequired<DominatorTree>();
+        }
     };
 }
 char QED::ID = 0;
