@@ -1204,7 +1204,8 @@ namespace
             {
                 CallSite CS(*iter);
                 Instruction *Call = CS.getInstruction();
-                res.pb(get_value_from_map(Call->getParent(), bb_id_map));
+                if(Call)
+                    res.pb(get_value_from_map(Call->getParent(), bb_id_map));
             }
             return res;
         }
