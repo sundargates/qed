@@ -42,6 +42,9 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/Support/CommandLine.h"
 
+#include <sstream>
+#include <cstdlib>
+
 using namespace llvm;
 
 #define FOR(i,x,y) for(int i=x; i<=y; i++)
@@ -139,6 +142,7 @@ namespace
             EDDI_CHECK_FUNCTION_NAME    = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME   = "cfcss_check_function";
             
+            // db(QEDMode);
             // db(NUM_CFTSS_BB);
             // NUM_ELEMENTS_IN_CFTSS_ARRAY = NUM_CFTSS_BB;
             // db(NUM_ELEMENTS_IN_CFTSS_ARRAY);
@@ -357,12 +361,13 @@ namespace
         {
             bool success = true;
             success &= !isa<TerminatorInst>(inst);
-            // success &= !isa<PHINode>(inst);
 
             CallInst *call = dyn_cast<CallInst>(inst);
-            success &= !call || (call && (call->isInlineAsm())); 
-
-                // || call->getCalledFunction()->getName() == "printf"));
+            Function *F = call?call->getCalledFunction():NULL;
+            success &= !call 
+                    || (call && (call->isInlineAsm()))
+                    || (call && F && (F->isIntrinsic()))
+                    ;
             return success;
         }
         bool isPhi(Instruction *inst)
@@ -682,7 +687,8 @@ namespace
                 db("The basic block has been mapped before.");
                 exit(-1);
             }
-            bb_id_map[bb] = currentBasicBlock++;
+            bb_id_map[bb] = currentBasicBlock;
+            currentBasicBlock++;
         }
         void mapBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> &bb_id_map)
         {
@@ -690,6 +696,14 @@ namespace
 
             for each(child, *root)
                 mapBlockTree(*child, bb_id_map);
+        }
+        std::string int_to_string(int a)
+        {
+            std::stringstream s;
+            s<<a;
+            std::string res;
+            s>>res;
+            return res;
         }
         void trackBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
@@ -721,6 +735,13 @@ namespace
             cftss_block.pb(get_element_ptr_inst);
             
             Instruction *store_inst           = new StoreInst (tobestoredval, get_element_ptr_inst);
+            {
+                LLVMContext& C = store_inst->getContext();
+                std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
+                std::string temp = "BasicBlockID-" + bbid;
+                MDNode* N = MDNode::get(C, tobestoredval);
+                store_inst->setMetadata(temp, N);
+            }
             cftss_block.pb(store_inst);
             
             Instruction *increment            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one);
@@ -1064,8 +1085,7 @@ namespace
             else
             {
                 createExitCall(one, bb3, &module);
-                BranchInst *branchinst = BranchInst::Create(bb3, bb2, check_value, bb1);
-                branchinst = BranchInst::Create(bb2, bb3);
+                BranchInst::Create(bb2, bb3);
             }
         }
         void createCFCSSCheckFunction(Module &module)
@@ -1209,6 +1229,17 @@ namespace
             }
             return res;
         }
+        std::vector<int> returnExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            std::vector<int> res;
+            FORE(iter, (*F))
+            {
+                ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                if (ret && ret->getReturnValue() && ret->getParent()!=NULL)
+                    res.pb(get_value_from_map(ret->getParent(), bb_id_map));
+            }
+            return res;
+        }
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -1276,7 +1307,8 @@ namespace
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                 {
-                    std::vector<int> temp = returnCallers(iter, bb_id_map);
+                    std::vector<int> temp1 = returnCallers(iter, bb_id_map);
+                    std::vector<int> temp2 = returnExits(iter, bb_id_map);
                     // db(iter->getName());
                     // FORN(i, sz(temp))
                     //     db(temp[i]);
