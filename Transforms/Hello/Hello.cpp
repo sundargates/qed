@@ -30,6 +30,7 @@
 #include "llvm/Support/CallSite.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/InstIterator.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Analysis/Dominators.h"
 
@@ -121,6 +122,9 @@ namespace
         GlobalVariable *cftss_array;
         GlobalVariable *cftss_array_pos;
         GlobalVariable *cftss_array_n;
+
+        GlobalVariable *last_global_id;
+
 
         Function *EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
@@ -889,6 +893,7 @@ namespace
             {
                 necklace.push_back(ConstantInt::get(i8, *character));
             }
+            necklace.push_back(ConstantInt::get(i8, 0));
             return ConstantArray::get(ArrayType::get(i8, string.size()), necklace);
         }
 
@@ -1217,15 +1222,19 @@ namespace
                 return false;
             return true;
         }
+        //Returns true if a function should have CFCSS function call checks done on it.
+        bool needsChecks(Function* F)
+        {
+            return (!F->empty()) && canCloneFunction(F);
+        }
+
         std::vector<int> returnCallers(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
             std::vector<int> res;
             for each_custom(iter, *F, use_begin, use_end)
             {
-                CallSite CS(*iter);
-                Instruction *Call = CS.getInstruction();
-                if(Call)
-                    res.pb(get_value_from_map(Call->getParent(), bb_id_map));
+                CallInst* caller = dyn_cast<CallInst>(*iter);
+                if (caller) res.pb(get_value_from_map(caller->getParent(), bb_id_map));
             }
             return res;
         }
@@ -1235,11 +1244,73 @@ namespace
             FORE(iter, (*F))
             {
                 ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
-                if (ret && ret->getReturnValue() && ret->getParent()!=NULL)
+                if (ret && ret->getReturnValue() && ret->getParent()!=NULL && bb_id_map[ret->getParent()])
                     res.pb(get_value_from_map(ret->getParent(), bb_id_map));
             }
             return res;
         }
+        /* The goal here is to find the list of basic blocks that could call this function,
+         * and create CFCSS checks for them.
+         */
+        void createEntryBlockCFCSSCheck(Function* F, std::map<BasicBlock*, int>& bb_id_map)
+        {
+            std::vector<int> possible_values = returnCallers(F, bb_id_map);
+            if (sz(possible_values))
+                createCFCSSChecks(possible_values, F->getEntryBlock().getFirstInsertionPt(),
+                        get_value_from_map(&F->getEntryBlock(), bb_id_map), last_global_id,
+                        makeName(&F->getEntryBlock(), "_cfcss_checks"));
+        }
+
+        /* This function scans the basic block for CallInst instructions and creates checks
+         * after they return.
+         */
+        void createReturnChecks(BasicBlock* bb, std::map<BasicBlock*, int>& bb_id_map)
+        {
+            Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
+            for each(iter, (*bb))
+            {
+                CallInst* caller = dyn_cast<CallInst>(&*iter);
+                if (caller)
+                {
+                    new StoreInst(tobestoredval, last_global_id, caller);
+                    Function* called_func = caller->getCalledFunction();
+                    if (called_func && needsChecks(called_func)) //direct function call
+                    {
+                        std::vector<int> retIDs = returnExits(called_func, bb_id_map);
+                        if (sz(retIDs))
+                            createCFCSSChecks(retIDs, getNextInstruction(iter), get_value_from_map(bb, bb_id_map),
+                                            last_global_id, makeName(dyn_cast<Value>(iter), "_cfcss_checks"));
+                    } //For an indirect call, we don't need to do anything else.
+                }
+            }
+        }
+        void createCallChecksForFunction(Function* F, std::map<BasicBlock*, int>& bb_id_map)
+        {
+            //There's no need to make entry checks at the start of the program.
+            if (strcmp(F->getName().data(), "main"))
+                createEntryBlockCFCSSCheck(F, bb_id_map);
+            for each(iter, (*F))
+            {
+                //If the basic block is unreachable, there's no need to do anything
+                if (!bb_id_map[iter]) continue;
+                createReturnChecks(iter, bb_id_map);
+                //Then, if it's a return block, update the global ID
+                ReturnInst* ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                if (ret)
+                {
+                    Value *tobestoredval = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(iter, bb_id_map), false);
+                    new StoreInst(tobestoredval, last_global_id, ret);
+                }
+            }
+        }
+        void createFunctionCallCFCSS(Module& M, std::map<BasicBlock*, int>& bb_id_map)
+        {
+            for each(iter, M)
+            {
+                if (needsChecks(iter)) createCallChecksForFunction(iter, bb_id_map);
+            }
+        }
+
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -1278,6 +1349,15 @@ namespace
                                                 GlobalValue::PrivateLinkage, 
                                                 i32_zero, 
                                                 "CFTSS_ARRAY_N"
+                                            );
+                last_global_id = new GlobalVariable
+                                            (
+                                                M,
+                                                i32,
+                                                false,
+                                                GlobalValue::PrivateLinkage,
+                                                i32_zero,
+                                                "LAST_GLOBAL_CFTSS_ID"
                                             );
                 // cftss_id->setThreadLocal(true);
             }
@@ -1318,6 +1398,8 @@ namespace
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, bb_id_map, M);
+
+            if (supportsCFCSS(QEDMode)) createFunctionCallCFCSS(M, bb_id_map);
 
             return true;
         }
