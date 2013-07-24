@@ -121,6 +121,7 @@ namespace
         GlobalVariable *cftss_array;
         GlobalVariable *cftss_array_pos;
         GlobalVariable *cftss_array_n;
+        GlobalVariable *global_cfcss_id;
 
         Function *EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
@@ -130,17 +131,17 @@ namespace
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
-            i1                          = Type::getInt1Ty(context);
-            i8                          = Type::getInt8Ty(context);
-            i32                         = Type::getInt32Ty(context);
-            i64                         = Type::getInt64Ty(context);
+            i1                        = Type::getInt1Ty(context);
+            i8                        = Type::getInt8Ty(context);
+            i32                       = Type::getInt32Ty(context);
+            i64                       = Type::getInt64Ty(context);
             
-            one                         = ConstantInt::get(Type::getInt32Ty(context),1);
-            i1_true                     = ConstantInt::get(i1, true);
-            i1_false                    = ConstantInt::get(i1, false);
-            i32_zero                    = ConstantInt::get(i32, 0);
-            EDDI_CHECK_FUNCTION_NAME    = "eddi_check_function";
-            CFCSS_CHECK_FUNCTION_NAME   = "cfcss_check_function";
+            one                       = ConstantInt::get(Type::getInt32Ty(context),1);
+            i1_true                   = ConstantInt::get(i1, true);
+            i1_false                  = ConstantInt::get(i1, false);
+            i32_zero                  = ConstantInt::get(i32, 0);
+            EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
+            CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
             
             // db(QEDMode);
             // db(NUM_CFTSS_BB);
@@ -257,7 +258,7 @@ namespace
             }
 
             FunctionType * new_type = FunctionType::get(new_return_type, arg_types, type->isVarArg());
-            unsigned address_space = func->getType()->getAddressSpace();
+            unsigned address_space  = func->getType()->getAddressSpace();
             func->mutateType(PointerType::get(new_type, address_space));
 
             /* Duplicate arguments */
@@ -556,7 +557,6 @@ namespace
         Value * createCFCSSChecks(
                                     std::vector<int> possible_values,
                                     Instruction * insertBefore, 
-                                    int current_basicblock_id, 
                                     Value *last_cftss_id,
                                     const Twine & name = ""
                                 )
@@ -789,7 +789,6 @@ namespace
                     (
                         possible_values, 
                         bb->getFirstInsertionPt(), 
-                        get_value_from_map(bb, bb_id_map), 
                         last_cftss_id,
                         makeName(bb, "_cfcss_checks")
                     );
@@ -1229,6 +1228,20 @@ namespace
             }
             return res;
         }
+        void insertStoresBeforeCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                if(Call)
+                {
+                    int bbid             = get_value_from_map(Call->getParent(), bb_id_map);
+                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
+                    new StoreInst(tobestoredval, global_cfcss_id, Call);
+                }
+            }
+        }
         std::vector<int> returnExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
             std::vector<int> res;
@@ -1239,6 +1252,39 @@ namespace
                     res.pb(get_value_from_map(ret->getParent(), bb_id_map));
             }
             return res;
+        }
+        void insertStoresBeforeExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            FORE(iter, (*F))
+            {
+                ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                if (ret && ret->getReturnValue() && ret->getParent()!=NULL)
+                {
+                    int bbid = get_value_from_map(ret->getParent(), bb_id_map);
+                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
+                    new StoreInst(tobestoredval, global_cfcss_id, ret);
+                }
+            }
+        }
+        void insertChecksAfterCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            std::vector<int> exitBasicBlocks = returnExits(F, bb_id_map);
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                Instruction *nextInstruction = getNextInstruction(Call);
+                if(nextInstruction && Call && sz(exitBasicBlocks))
+                {
+                    createCFCSSChecks 
+                        (                                
+                            exitBasicBlocks,    // std::vector<int> possible_values,
+                            nextInstruction,    // Instruction * insertBefore,
+                            global_cfcss_id,    // Value *last_cftss_id,
+                            "exit_cfcss_checks" // const Twine & name = ""
+                        );
+                }
+            }
         }
         bool runOnModule(Module &M)
         {
@@ -1252,8 +1298,7 @@ namespace
                 FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
                     temp.pb(i32_zero);
 
-                cftss_array = new GlobalVariable
-                                            (  
+                cftss_array     = new GlobalVariable (
                                                 M, 
                                                 getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), 
                                                 false, 
@@ -1261,8 +1306,7 @@ namespace
                                                 ConstantArray::get(getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), temp), 
                                                 "CFTSS_ARRAY"
                                             );
-                cftss_array_pos = new GlobalVariable
-                                            (  
+                cftss_array_pos = new GlobalVariable (
                                                 M, 
                                                 i32, 
                                                 false, 
@@ -1270,14 +1314,21 @@ namespace
                                                 i32_zero, 
                                                 "CFTSS_ARRAY_POS"
                                             );
-                cftss_array_n = new GlobalVariable
-                                            (  
+                cftss_array_n   = new GlobalVariable (
                                                 M, 
                                                 i32, 
                                                 false, 
                                                 GlobalValue::PrivateLinkage, 
                                                 i32_zero, 
                                                 "CFTSS_ARRAY_N"
+                                            );
+                global_cfcss_id = new GlobalVariable (
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero,
+                                                "GLOBAL_CFCSS_ID"
                                             );
                 // cftss_id->setThreadLocal(true);
             }
@@ -1304,20 +1355,31 @@ namespace
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     mapFunctionBasicBlocks(iter, bb_id_map, M);
 
-            FORE(iter, M)
-                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                {
-                    std::vector<int> temp1 = returnCallers(iter, bb_id_map);
-                    std::vector<int> temp2 = returnExits(iter, bb_id_map);
-                    // db(iter->getName());
-                    // FORN(i, sz(temp))
-                    //     db(temp[i]);
-                }
 
             // Iterate over all the functions and clone them
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, bb_id_map, M);
+
+            if (supportsCFCSS(QEDMode))
+                FORE(iter, M)
+                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    {
+                        Function *F = iter;
+                        std::vector<int> callers = returnCallers(iter, bb_id_map);
+                        if(sz(callers))
+                            createCFCSSChecks 
+                                (                                
+                                    callers,                                       // std::vector<int> possible_values,
+                                    F->getEntryBlock().getFirstInsertionPt(),      // Instruction * insertBefore,
+                                    global_cfcss_id,                               // Value *last_cftss_id,
+                                    makeName(&F->getEntryBlock(), "_cfcss_checks") // const Twine & name = ""
+                                );
+
+                    insertStoresBeforeCalls (F, bb_id_map);
+                    insertStoresBeforeExits (F, bb_id_map);
+                    insertChecksAfterCalls  (F, bb_id_map);
+                }
 
             return true;
         }
