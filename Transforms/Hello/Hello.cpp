@@ -1351,8 +1351,8 @@ namespace
             if (supportsEDDI(QEDMode))
                 createEDDICheckFunction(M);
 
-            if (supportsCFCSS(QEDMode))
-                createCFCSSCheckFunction(M);
+            if (supportsCFCSS(QEDMode) || supportsGlobalCFCSS(QEDMode))
+                createCFCSSCheckFunction(M, bb_id_map);
 
 
             if (supportsEDDI(QEDMode))
