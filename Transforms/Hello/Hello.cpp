@@ -1313,7 +1313,7 @@ namespace
             if (supportsEDDI(QEDMode))
                 createEDDICheckFunction(M, bb_id_map);
 
-            if (supportsCFCSS(QEDMode))
+            if (supportsCFCSS(QEDMode) || supportsGlobalCFCSS(QEDMode))
                 createCFCSSCheckFunction(M, bb_id_map);
 
 
