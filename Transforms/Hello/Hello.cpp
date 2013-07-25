@@ -130,6 +130,9 @@ namespace
         GlobalVariable    * cftss_array_n;
         GlobalVariable    * global_cfcss_id;
 
+        //This is only used if NUM_CFTSS_BBS = 1, so as to avoid using the array above.
+        GlobalVariable    * last_bb_id; 
+
         Function          * EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
 
@@ -678,7 +681,6 @@ namespace
                 Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
                 CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
-
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, 
             ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
@@ -726,43 +728,55 @@ namespace
             Instruction *increment_n            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_n, one);
             cftss_block.pb(increment_n);
             cftss_block.pb(new StoreInst(increment_n, cftss_array_n));
-            
-            // Push the new basic block ID into the vector and pop one if necessary.
-            Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "");
-            cftss_block.pb(loaded_cftss_array_pos);
-            Instruction *sext_cftss_array_pos   = new SExtInst(loaded_cftss_array_pos, i64, "");
-            cftss_block.pb(sext_cftss_array_pos);
-            
 
-            std::vector<Value *> temp;
-            temp.pb(i32_zero);
-            temp.pb(sext_cftss_array_pos);
-
-
-
-            Instruction *get_element_ptr_inst = GetElementPtrInst::CreateInBounds(cftss_array, temp, "");
-            cftss_block.pb(get_element_ptr_inst);
-            
-            Instruction *store_inst           = new StoreInst (tobestoredval, get_element_ptr_inst);
+            if (NUM_ELEMENTS_IN_CFTSS_ARRAY > 1)
             {
-                LLVMContext& C = store_inst->getContext();
-                std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
-                std::string temp = "BasicBlockID-" + bbid;
-                MDNode* N = MDNode::get(C, tobestoredval);
-                store_inst->setMetadata(temp, N);
+            
+                // Push the new basic block ID into the vector and pop one if necessary.
+                Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "");
+                cftss_block.pb(loaded_cftss_array_pos);
+                Instruction *sext_cftss_array_pos   = new SExtInst(loaded_cftss_array_pos, i64, "");
+                cftss_block.pb(sext_cftss_array_pos);
+            
+
+                std::vector<Value *> temp;
+                temp.pb(i32_zero);
+                temp.pb(sext_cftss_array_pos);
+
+
+
+                Instruction *get_element_ptr_inst = GetElementPtrInst::CreateInBounds(cftss_array, temp, "");
+                cftss_block.pb(get_element_ptr_inst);
+            
+                Instruction *store_inst           = new StoreInst (tobestoredval, get_element_ptr_inst);
+                {
+                    LLVMContext& C = store_inst->getContext();
+                    std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
+                    std::string temp = "BasicBlockID-" + bbid;
+                    MDNode* N = MDNode::get(C, tobestoredval);
+                    store_inst->setMetadata(temp, N);
+                }
+                cftss_block.pb(store_inst);
+                Instruction *increment            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one);
+                cftss_block.pb(increment);
+            
+                Instruction *mod_instruction      = BinaryOperator::Create(Instruction::URem, increment, ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY));
+                cftss_block.pb(mod_instruction);
+            
+                Instruction *final_store          = new StoreInst (mod_instruction, cftss_array_pos);
+                cftss_block.pb(final_store);
+            } else { //otherwise, it's not necessary to update the array
+                //TODO factor with the above?
+                Instruction *store_inst = new StoreInst (tobestoredval, last_bb_id);
+                {
+                    LLVMContext& C = store_inst->getContext();
+                    std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
+                    std::string temp = "BasicBlockID-" + bbid;
+                    MDNode* N = MDNode::get(C, tobestoredval);
+                    store_inst->setMetadata(temp, N);
+                }
+                cftss_block.pb(store_inst);
             }
-            cftss_block.pb(store_inst);
-            
-            Instruction *increment            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one);
-            cftss_block.pb(increment);
-            
-            Instruction *mod_instruction      = BinaryOperator::Create(Instruction::URem, increment, ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY));
-            cftss_block.pb(mod_instruction);
-            
-            Instruction *final_store          = new StoreInst (mod_instruction, cftss_array_pos);
-            cftss_block.pb(final_store);
-
-
 
             //TODO: clean up this code.
             Instruction *insertionPoint = bb->getFirstInsertionPt();
@@ -937,9 +951,18 @@ namespace
             return call;
         }
         //Unifying code between EDDI_check_function and CFCSS_check_function
-        void printLastBasicBlocks(Module& module, Function* checkFunction, LLVMContext& context, BasicBlock* exit_bb,
-            std::map<BasicBlock*, int>& bb_id_map)
+        void printLastBasicBlocks(Module& module, Function* checkFunction, LLVMContext& context, BasicBlock* exit_bb)
         {
+            if (NUM_ELEMENTS_IN_CFTSS_ARRAY == 1)
+            {
+                Instruction *loaded_bb_val = new LoadInst(last_bb_id, "", exit_bb);
+                Value* temp[1];
+                temp[0] = loaded_bb_val;
+                createPrintfCall("cfcssmessage1", "Basic Block ID = %d\n", temp, exit_bb, &module);
+                createExitCall(one, exit_bb, &module);
+                BranchInst::Create(exit_bb, exit_bb); //this works, but can be made cleaner (e.g. passing in return block)
+                return;
+            }
             Instruction *i_iter = new AllocaInst (Type::getInt32Ty(context), 0, "i", exit_bb);
             new StoreInst(i32_zero, i_iter, exit_bb);
 
@@ -951,6 +974,9 @@ namespace
             // Basic Block 3 LLVM IR code:
             // This is where the control gets into if a check fails.
             // We basically want to print all the basic blocks list in this place.
+
+            // If only one value is tracked, this is different, as there is just a single value,
+            // rather than an array. Then, that value is printed, and the program exits.
 
             // exit_block: 
             //     %i = alloca i32, align 4
@@ -968,8 +994,6 @@ namespace
             //     %arrayidx = getelementptr inbounds [100 x i32]* @array, i32 0, i64 %idxprom
             //     %2 = load i32* %arrayidx, align 4
             //     %call = call i32 (i8*, ...)* @printf(i8* getelementptr inbounds ([4 x i8]* @.str, i32 0, i32 0), i32 %2)
-//                 %test = icmp i32 %2 0
-//                 br exit_bb inc_bb
             //     br label %for.inc
 
             // for.inc:                                          ; preds = %for.body
@@ -989,7 +1013,14 @@ namespace
             //     br label %return_block
 
             // exit_block:
-            {               
+            {
+                //Thanks to an off-by-one error, it's necessary to decrement first
+                Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", exit_bb);
+                Value* toAdd                        = ConstantInt::get(Type::getInt32Ty(context), NUM_ELEMENTS_IN_CFTSS_ARRAY - 1);
+                Instruction *decrement              = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, toAdd, "dec1", exit_bb);
+                Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
+                                                        ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", exit_bb);
+                new StoreInst(mod_instruction, cftss_array_pos, exit_bb);  
                 BranchInst::Create(cond_bb, exit_bb);
             }
 
@@ -1018,15 +1049,6 @@ namespace
                 temp.pb(loaded_array_val);
                 temp.pb(load_i);
                 createPrintfCall("cfcssmessage1", "Basic Block ID = %d\tI = %d\n", temp, body_bb, &module);
-                //int main_entry_bb_val = get_value_from_map(&(module.getFunction(StringRef("main"))->getEntryBlock()), bb_id_map);
-                //Instruction* cmp_i = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_NE, temp[0],
-                //                                ConstantInt::get(i32, 0), "cmp", body_bb);
-                //                                  ConstantInt::get(i32, main_entry_bb_val), "cmp", body_bb);
-                //How about I just compare i and CFCSS_ARRAY_N?
-                //Instruction* load_n = new LoadInst(cftss_array_n, "", body_bb);
-                //Instruction* cmp_i = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_SLT, loaded_array_val,
-                //                                load_n, "cmp", body_bb);
-                //BranchInst::Create(inc_bb, end_bb, cmp_i, body_bb);
                 BranchInst::Create(inc_bb, body_bb);
             }
 
@@ -1035,15 +1057,18 @@ namespace
                 Instruction *load_i                 = new LoadInst(i_iter, "", inc_bb);
                 Instruction *increment              = BinaryOperator::Create(Instruction::Add, load_i, one, "inc", inc_bb);
                 new StoreInst(increment, i_iter, inc_bb);
-                Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", inc_bb);
-                Value* toAdd                        = ConstantInt::get(Type::getInt32Ty(context), NUM_ELEMENTS_IN_CFTSS_ARRAY - 1);
-                //Instead of decrementing 1 and adding 10, it's easier to just add 9.
-                //Added 10 because urem computes remainder by converting to an unsigned int, which causes undesirable
-                // behavior, so it's easier to just deal with a positive number.
-                Instruction *decrement              = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, toAdd, "dec1", inc_bb);
-                Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
-                                                    ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", inc_bb);
-                new StoreInst(mod_instruction, cftss_array_pos, inc_bb);
+                if (NUM_ELEMENTS_IN_CFTSS_ARRAY > 1)
+                {
+                    Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", inc_bb);
+                    Value* toAdd                        = ConstantInt::get(Type::getInt32Ty(context), NUM_ELEMENTS_IN_CFTSS_ARRAY - 1);
+                    //Instead of decrementing 1 and adding N, it's easier to just add N-1.
+                    //Added N because urem computes remainder by converting to an unsigned int, which causes undesirable
+                    // behavior, so it's easier to just deal with a positive number.
+                    Instruction *decrement              = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, toAdd, "dec1", inc_bb);
+                    Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
+                                                        ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", inc_bb);
+                    new StoreInst(mod_instruction, cftss_array_pos, inc_bb);
+                }
                 BranchInst::Create(cond_bb, inc_bb);
             }
             //for.end:
@@ -1053,7 +1078,7 @@ namespace
             }
         }
 
-        void createEDDICheckFunction(Module &module, std::map<BasicBlock*, int>& bb_id_map)
+        void createEDDICheckFunction(Module &module)
         {
             assert(supportsEDDI(QEDMode));
 
@@ -1111,7 +1136,7 @@ namespace
                 // Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
                 //                                     ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
                 // new StoreInst(mod_instruction, cftss_array_pos, bb3);
-                printLastBasicBlocks(module, EDDICheckFunction, context, bb3, bb_id_map);
+                printLastBasicBlocks(module, EDDICheckFunction, context, bb3);
             }
             else
             {
@@ -1119,7 +1144,7 @@ namespace
                 BranchInst::Create(bb2, bb3);
             }
         }
-        void createCFCSSCheckFunction(Module &module, std::map<BasicBlock*, int>& bb_id_map)
+        void createCFCSSCheckFunction(Module &module)
         {
             assert (supportsCFCSS(CFCSS) && "CFCSS Check Function shouldn't be created");
 
@@ -1163,7 +1188,7 @@ namespace
 
             if(supportsCFTSS(QEDMode))
             {
-                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3, bb_id_map);
+                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3);
             }
             else
             {
@@ -1263,26 +1288,38 @@ namespace
 
             if (supportsCFTSS(QEDMode))
             {
-                std::vector<Constant *> temp;
-                FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
-                    temp.pb(i32_zero);
+                if (NUM_ELEMENTS_IN_CFTSS_ARRAY > 1)
+                {
+                    std::vector<Constant *> temp;
+                    FORN(i, NUM_ELEMENTS_IN_CFTSS_ARRAY)
+                        temp.pb(i32_zero);
 
-                cftss_array     = new GlobalVariable (
-                                                M, 
-                                                getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), 
-                                                false, 
-                                                GlobalValue::PrivateLinkage, 
-                                                ConstantArray::get(getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), temp), 
-                                                "CFTSS_ARRAY"
-                                            );
-                cftss_array_pos = new GlobalVariable (
-                                                M, 
-                                                i32, 
-                                                false, 
-                                                GlobalValue::PrivateLinkage, 
-                                                i32_zero, 
-                                                "CFTSS_ARRAY_POS"
-                                            );
+                    cftss_array     = new GlobalVariable (
+                                                    M, 
+                                                    getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), 
+                                                    false, 
+                                                    GlobalValue::PrivateLinkage, 
+                                                    ConstantArray::get(getArrayType(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), temp), 
+                                                    "CFTSS_ARRAY"
+                                                );
+                    cftss_array_pos = new GlobalVariable (
+                                                    M, 
+                                                    i32, 
+                                                    false, 
+                                                    GlobalValue::PrivateLinkage, 
+                                                    i32_zero, 
+                                                    "CFTSS_ARRAY_POS"
+                                                );
+                } else { //in which case we only need the one ID
+                    last_bb_id      = new GlobalVariable(
+                                                    M,
+                                                    i32,
+                                                    false,
+                                                    GlobalValue::PrivateLinkage,
+                                                    i32_zero,
+                                                    "LAST_BB_ID"
+                                                );
+                }
                 cftss_array_n   = new GlobalVariable (
                                                 M, 
                                                 i32, 
@@ -1291,6 +1328,7 @@ namespace
                                                 i32_zero, 
                                                 "CFTSS_ARRAY_N"
                                             );
+                
             }
             if(supportsGlobalCFCSS(QEDMode))
             {
@@ -1311,10 +1349,10 @@ namespace
                     mapFunctionBasicBlocks(iter, bb_id_map, M);
 
             if (supportsEDDI(QEDMode))
-                createEDDICheckFunction(M, bb_id_map);
+                createEDDICheckFunction(M);
 
             if (supportsCFCSS(QEDMode))
-                createCFCSSCheckFunction(M, bb_id_map);
+                createCFCSSCheckFunction(M);
 
 
             if (supportsEDDI(QEDMode))
