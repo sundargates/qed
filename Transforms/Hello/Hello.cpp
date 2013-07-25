@@ -716,6 +716,18 @@ namespace
             s>>res;
             return res;
         }
+        Instruction* storeID(BasicBlock* bb, Value* tobestoredval, Value* tostorein, std::map<BasicBlock*, int>& bb_id_map)
+        {
+            Instruction *store_inst = new StoreInst (tobestoredval, tostorein);
+            {
+                LLVMContext& C = store_inst->getContext();
+                std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
+                std::string temp = "BasicBlockID-" + bbid;
+                MDNode* N = MDNode::get(C, tobestoredval);
+                store_inst->setMetadata(temp, N);
+            }
+            return store_inst;
+        }
         void trackBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
             std::vector<Instruction *> cftss_block;
@@ -748,15 +760,7 @@ namespace
                 Instruction *get_element_ptr_inst = GetElementPtrInst::CreateInBounds(cftss_array, temp, "");
                 cftss_block.pb(get_element_ptr_inst);
             
-                Instruction *store_inst           = new StoreInst (tobestoredval, get_element_ptr_inst);
-                {
-                    LLVMContext& C = store_inst->getContext();
-                    std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
-                    std::string temp = "BasicBlockID-" + bbid;
-                    MDNode* N = MDNode::get(C, tobestoredval);
-                    store_inst->setMetadata(temp, N);
-                }
-                cftss_block.pb(store_inst);
+                cftss_block.pb(storeID(bb, tobestoredval, get_element_ptr_inst, bb_id_map));
                 Instruction *increment            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_pos, one);
                 cftss_block.pb(increment);
             
@@ -766,16 +770,7 @@ namespace
                 Instruction *final_store          = new StoreInst (mod_instruction, cftss_array_pos);
                 cftss_block.pb(final_store);
             } else { //otherwise, it's not necessary to update the array
-                //TODO factor with the above?
-                Instruction *store_inst = new StoreInst (tobestoredval, last_bb_id);
-                {
-                    LLVMContext& C = store_inst->getContext();
-                    std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
-                    std::string temp = "BasicBlockID-" + bbid;
-                    MDNode* N = MDNode::get(C, tobestoredval);
-                    store_inst->setMetadata(temp, N);
-                }
-                cftss_block.pb(store_inst);
+                cftss_block.pb(storeID(bb, tobestoredval, last_bb_id, bb_id_map));
             }
 
             //TODO: clean up this code.
@@ -951,7 +946,7 @@ namespace
             return call;
         }
         //Unifying code between EDDI_check_function and CFCSS_check_function
-        void printLastBasicBlocks(Module& module, Function* checkFunction, LLVMContext& context, BasicBlock* exit_bb)
+        void printLastBasicBlocks(Module& module, Function* checkFunction, LLVMContext& context, BasicBlock* exit_bb, BasicBlock* ret_bb)
         {
             if (NUM_ELEMENTS_IN_CFTSS_ARRAY == 1)
             {
@@ -960,7 +955,7 @@ namespace
                 temp[0] = loaded_bb_val;
                 createPrintfCall("cfcssmessage1", "Basic Block ID = %d\n", temp, exit_bb, &module);
                 createExitCall(one, exit_bb, &module);
-                BranchInst::Create(exit_bb, exit_bb); //this works, but can be made cleaner (e.g. passing in return block)
+                BranchInst::Create(ret_bb, exit_bb);
                 return;
             }
             Instruction *i_iter = new AllocaInst (Type::getInt32Ty(context), 0, "i", exit_bb);
@@ -1074,7 +1069,7 @@ namespace
             //for.end:
             {
                 createExitCall(one, end_bb, &module);
-                BranchInst::Create(exit_bb, end_bb); //Should this be the return block instead?
+                BranchInst::Create(ret_bb, end_bb);
             }
         }
 
@@ -1136,7 +1131,7 @@ namespace
                 // Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
                 //                                     ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
                 // new StoreInst(mod_instruction, cftss_array_pos, bb3);
-                printLastBasicBlocks(module, EDDICheckFunction, context, bb3);
+                printLastBasicBlocks(module, EDDICheckFunction, context, bb3, bb2);
             }
             else
             {
@@ -1188,7 +1183,7 @@ namespace
 
             if(supportsCFTSS(QEDMode))
             {
-                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3);
+                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3, bb2);
             }
             else
             {
