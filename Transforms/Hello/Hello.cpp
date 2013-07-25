@@ -66,29 +66,35 @@ typedef ValueToValueMapTy ValueDuplicateMap;
 
 enum QEDLevel
 {
-    EDDI,
-    CFTSS,
-    EDDIANDCFTSS,
-    CFCSS,
-    ALL
+    EDDI        = 0x1,
+    CFTSS       = 0x2,
+    CFCSS       = 0x4,
+    GlobalCFCSS = 0x8
 };
 
 // Some Command Line Arguments will be parsed here
-static cl::opt<QEDLevel> QEDMode 
+// static cl::opt<QEDLevel> QEDMode 
+// (
+//     "QED-Mode", 
+//     cl::init(ALL), 
+//     cl::desc("Choose QED Mode:"),
+//     cl::value_desc("QED Mode"),
+//     cl::values
+//     (
+//         clEnumVal(EDDI , "Enable EDDI Transformations"),
+//         clEnumVal(CFTSS, "Enable CFTSS Transformations"),
+//         clEnumVal(EDDIANDCFTSS, "Enable both EDDI and CFTSS Transformations"),
+//         clEnumVal(CFCSS, "Enable CFCSS Transformations"),
+//         clEnumVal(ALL,   "Enable All Transformations"),
+//         clEnumValEnd
+//     )
+// );
+
+static cl::opt<int> QEDMode
 (
-    "QED-Mode", 
-    cl::init(ALL), 
-    cl::desc("Choose QED Mode:"),
-    cl::value_desc("QED Mode"),
-    cl::values
-    (
-        clEnumVal(EDDI , "Enable EDDI Transformations"),
-        clEnumVal(CFTSS, "Enable CFTSS Transformations"),
-        clEnumVal(EDDIANDCFTSS, "Enable both EDDI and CFTSS Transformations"),
-        clEnumVal(CFCSS, "Enable CFCSS Transformations"),
-        clEnumVal(ALL,   "Enable All Transformations"),
-        clEnumValEnd
-    )
+    "QED-Mode",
+    cl::init(EDDI),
+    cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = GlobalCFCSS")
 );
 
 static cl::opt<int> NUM_ELEMENTS_IN_CFTSS_ARRAY
@@ -104,29 +110,29 @@ namespace
     {
         public:
         static char ID;
-        Value *one;
-        LLVMContext & context;
-        IntegerType * i1;
-        IntegerType * i8;
-        IntegerType * i32;
-        IntegerType * i64;
-        ConstantInt * i1_true;
-        ConstantInt * i1_false;
-        ConstantInt * i32_zero;
+        Value             * one;
+        LLVMContext       & context;
+        IntegerType       * i1;
+        IntegerType       * i8;
+        IntegerType       * i32;
+        IntegerType       * i64;
+        ConstantInt       * i1_true;
+        ConstantInt       * i1_false;
+        ConstantInt       * i32_zero;
         int currentBasicBlock;
         // int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
-        // GlobalVariable *last_cftss_id;
-        GlobalVariable *cftss_array;
-        GlobalVariable *cftss_array_pos;
-        GlobalVariable *cftss_array_n;
-        GlobalVariable *global_cfcss_id;
+        // GlobalVariable * last_cftss_id;
+        GlobalVariable    * cftss_array;
+        GlobalVariable    * cftss_array_pos;
+        GlobalVariable    * cftss_array_n;
+        GlobalVariable    * global_cfcss_id;
 
-        Function *EDDICheckFunction;
+        Function          * EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
 
-        Function *CFCSSCheckFunction;
+        Function          * CFCSSCheckFunction;
         std::string CFCSS_CHECK_FUNCTION_NAME;
 
         QED() : ModulePass(ID), context(getGlobalContext())
@@ -142,41 +148,42 @@ namespace
             i32_zero                  = ConstantInt::get(i32, 0);
             EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
-            
-            // db(QEDMode);
+
+            assert ( (QEDMode<16) && "QED Mode cannot be greater than 15. Each bit represents one \
+                option and there are only four options to choose.");
+
+            errs()<<"\n";
+            if(supportsEDDI(QEDMode))
+                errs()<<"EDDI\n";
+
+            if(supportsCFTSS(QEDMode))
+                errs()<<"CFTSS\n";
+
+            if(supportsCFCSS(QEDMode))
+                errs()<<"CFCSS\n";
+
+            if(supportsGlobalCFCSS(QEDMode))
+                errs()<<"GlobalCFCSS\n";
+
             // db(NUM_CFTSS_BB);
             // NUM_ELEMENTS_IN_CFTSS_ARRAY = NUM_CFTSS_BB;
             // db(NUM_ELEMENTS_IN_CFTSS_ARRAY);
         }
-        bool supportsEDDI(QEDLevel QEDMode)
+        bool supportsEDDI(int QEDMode)
         {
-            if(QEDMode==EDDI)
-                return true;
-            if(QEDMode==EDDIANDCFTSS)
-                return true;
-            if(QEDMode==ALL)
-                return true;
-            return false;
+            return QEDMode & EDDI;
         }
-        bool supportsCFTSS(QEDLevel QEDMode)
+        bool supportsCFTSS(int QEDMode)
         {
-            if(QEDMode==CFTSS)
-                return true;
-            if(QEDMode==EDDIANDCFTSS)
-                return true;
-            if(QEDMode==CFCSS)
-                return true;
-            if(QEDMode==ALL)
-                return true;
-            return false;
+            return QEDMode & CFTSS;
         }
-        bool supportsCFCSS(QEDLevel QEDMode)
+        bool supportsCFCSS(int QEDMode)
         {
-            if(QEDMode==CFCSS)
-                return true;
-            if(QEDMode==ALL)
-                return true;
-            return false;
+            return QEDMode & CFCSS;
+        }
+        bool supportsGlobalCFCSS(int QEDMode)
+        {
+            return QEDMode & GlobalCFCSS;
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
@@ -864,6 +871,8 @@ namespace
                             muxReturnInst(ret, map);
                     }
                 }
+
+
             }
 
 
@@ -1322,6 +1331,9 @@ namespace
                                                 i32_zero, 
                                                 "CFTSS_ARRAY_N"
                                             );
+            }
+            if(supportsGlobalCFCSS(QEDMode))
+            {
                 global_cfcss_id = new GlobalVariable (
                                                 M, 
                                                 i32, 
@@ -1361,7 +1373,7 @@ namespace
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, bb_id_map, M);
 
-            if (supportsCFCSS(QEDMode))
+            if (supportsGlobalCFCSS(QEDMode))
                 FORE(iter, M)
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     {
