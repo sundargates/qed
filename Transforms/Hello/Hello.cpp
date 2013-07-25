@@ -124,7 +124,6 @@ namespace
         GlobalVariable *cftss_array_n;
         GlobalVariable *global_cfcss_id;
 
-
         Function *EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
 
@@ -1180,6 +1179,20 @@ namespace
                 }*/
             }
         }
+        void insertStoresBeforeCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                if(Call)
+                {
+                    int bbid             = get_value_from_map(Call->getParent(), bb_id_map);
+                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
+                    new StoreInst(tobestoredval, global_cfcss_id, Call);
+                }
+            }
+        }
         std::vector<int> returnExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
             std::vector<int> res;
@@ -1293,6 +1306,12 @@ namespace
                     }
             }
 
+            std::map<BasicBlock *, int> bb_id_map;
+            FORE(iter, M)
+                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    mapFunctionBasicBlocks(iter, bb_id_map, M);
+
+
             // Iterate over all the functions and clone them
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
@@ -1303,9 +1322,7 @@ namespace
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     {
                         Function *F = iter;
-                        if (!strcmp(F->getName().data(), "main")) continue;
                         std::vector<int> callers = returnCallers(iter, bb_id_map);
-                        //Here's where it matters that the callers might be indirect...?
                         if(sz(callers))
                             createCFCSSChecks 
                                 (                                
@@ -1317,10 +1334,10 @@ namespace
 
                     insertStoresBeforeCalls (F, bb_id_map);
                     insertStoresBeforeExits (F, bb_id_map);
-                    insertChecksAfterCalls  (F, bb_id_map);     
+                    insertChecksAfterCalls  (F, bb_id_map);
                 }
 
-            return true;            
+            return true;
         }
         void getAnalysisUsage(AnalysisUsage & info) const
         {
