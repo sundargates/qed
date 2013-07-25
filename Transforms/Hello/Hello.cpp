@@ -153,18 +153,18 @@ namespace
             assert ( (QEDMode<16) && "QED Mode cannot be greater than 15. Each bit represents one \
                 option and there are only four options to choose.");
 
-            errs()<<"\n";
-            if(supportsEDDI(QEDMode))
-                errs()<<"EDDI\n";
+            // errs()<<"\n";
+            // if(supportsEDDI(QEDMode))
+            //     errs()<<"EDDI\n";
 
-            if(supportsCFTSS(QEDMode))
-                errs()<<"CFTSS\n";
+            // if(supportsCFTSS(QEDMode))
+            //     errs()<<"CFTSS\n";
 
-            if(supportsCFCSS(QEDMode))
-                errs()<<"CFCSS\n";
+            // if(supportsCFCSS(QEDMode))
+            //     errs()<<"CFCSS\n";
 
-            if(supportsGlobalCFCSS(QEDMode))
-                errs()<<"GlobalCFCSS\n";
+            // if(supportsGlobalCFCSS(QEDMode))
+            //     errs()<<"GlobalCFCSS\n";
 
             // db(NUM_CFTSS_BB);
             // NUM_ELEMENTS_IN_CFTSS_ARRAY = NUM_CFTSS_BB;
@@ -1088,20 +1088,29 @@ namespace
             //     ret void
 
             // return_block:
+            {
                 ReturnInst::Create(context, 0, bb2);
+            }
 
             // exit_block:
+            {
                 std::vector<Value *> v; v.clear();
                 createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
+            }
 
             // If CFTSS is supported, we can print the last N basic blocks that got executed
             if(supportsCFTSS(QEDMode))
             {
-                Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb3);
-                Instruction *decrement              = BinaryOperator::Create(Instruction::Sub, loaded_cftss_array_pos, one, "dec", bb3);
-                Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
-                                                    ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
-                new StoreInst(mod_instruction, cftss_array_pos, bb3);
+                // TODO:
+                // Why was this even here? This doesn't make any sense.
+                // If I remember rightly, this was added by me for debugging purposes.
+                // Check if it is needed
+
+                // Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb3);
+                // Instruction *decrement              = BinaryOperator::Create(Instruction::Sub, loaded_cftss_array_pos, one, "dec", bb3);
+                // Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
+                //                                     ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
+                // new StoreInst(mod_instruction, cftss_array_pos, bb3);
                 printLastBasicBlocks(module, EDDICheckFunction, context, bb3, bb_id_map);
             }
             else
@@ -1123,16 +1132,22 @@ namespace
             module.getOrInsertFunction(CFCSS_CHECK_FUNCTION_NAME, ftype);
 
             CFCSSCheckFunction = module.getFunction(CFCSS_CHECK_FUNCTION_NAME);
-
-            std::vector<Argument *> arg_list;
-            for each_custom(arg, *CFCSSCheckFunction, arg_begin, arg_end)
-                arg_list.push_back(arg);
+            Argument *check_value = &CFCSSCheckFunction->getArgumentList().front();
             
-            BasicBlock* bb1 = llvm::BasicBlock::Create(context, "check_block", CFCSSCheckFunction);
-            BasicBlock* bb2 = llvm::BasicBlock::Create(context, "return_block", CFCSSCheckFunction);
-            BasicBlock* bb3 = llvm::BasicBlock::Create(context, "exit_block", CFCSSCheckFunction);
+            BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", CFCSSCheckFunction);
+            BasicBlock* bb1   = llvm::BasicBlock::Create(context, "check_block", CFCSSCheckFunction);
+            BasicBlock* bb2   = llvm::BasicBlock::Create(context, "return_block", CFCSSCheckFunction);
+            BasicBlock* bb3   = llvm::BasicBlock::Create(context, "exit_block", CFCSSCheckFunction);
 
-            BranchInst::Create(bb2, bb3, arg_list[0], bb1); // BB1->BB2 or BB3
+            //entry:
+            {
+                BasicBlock *currentBasicBlock = entry;
+                BranchInst::Create(bb1, currentBasicBlock);
+            }
+            // check_block:
+            {
+                BranchInst::Create(bb2, bb3, check_value, bb1); // BB1->BB2 or BB3
+            }
 
             // return_block:                                     ; preds = %for.end, %check_block
             //     ret void
@@ -1140,10 +1155,21 @@ namespace
             // return_block:
                 ReturnInst::Create(context, 0, bb2);
 
-            //exit_block:
-            std::vector<Value*> empty_vec;
-            createPrintfCall("cfcss_error_msg", "CFCSS Failed.\n", empty_vec, bb3, &module);
-            printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3, bb_id_map);
+            // exit_block:
+            {
+                std::vector<Value*> empty_vec;
+                createPrintfCall("cfcss_error_msg", "CFCSS Failed.\n", empty_vec, bb3, &module);
+            }
+
+            if(supportsCFTSS(QEDMode))
+            {
+                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3, bb_id_map);
+            }
+            else
+            {
+                createExitCall(one, bb3, &module);
+                BranchInst::Create(bb2, bb3);
+            }
         }
         ArrayType *getArrayType(Type *t, int N)
         {
@@ -1167,26 +1193,6 @@ namespace
                 if (caller) res.pb(get_value_from_map(caller->getParent(), bb_id_map));
             }
             return res;
-        }
-        void insertStoresBeforeCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
-        {
-            for each_custom(iter, *F, use_begin, use_end)
-            {
-                CallSite CS(*iter);
-                Instruction *Call = CS.getInstruction();
-                //CallInst* Call = dyn_cast<CallInst>(*iter);
-                if(Call)
-                {
-                    //So this method isn't finding indirect calls... what?
-                    //if (!Call->getCalledFunction()) printf("Indirect call detected.\n");
-                    //else printf("Direct call detected.\n");
-                    int bbid             = get_value_from_map(Call->getParent(), bb_id_map);
-                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
-                    new StoreInst(tobestoredval, global_cfcss_id, Call);
-                } /*else {
-                    printf("Indirect call to %s.\n", F->getName().data());
-                }*/
-            }
         }
         void insertStoresBeforeCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
@@ -1251,7 +1257,9 @@ namespace
         {
             currentBasicBlock = 1;
             ValueDuplicateMap map;
-            cloneGlobalVariables(M, map);
+
+            if (supportsEDDI(QEDMode))
+                cloneGlobalVariables(M, map);
 
             if (supportsCFTSS(QEDMode))
             {
@@ -1317,12 +1325,6 @@ namespace
                         modifyPrototype(iter,map);
                     }
             }
-
-            std::map<BasicBlock *, int> bb_id_map;
-            FORE(iter, M)
-                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                    mapFunctionBasicBlocks(iter, bb_id_map, M);
-
 
             // Iterate over all the functions and clone them
             FORE(iter, M)
