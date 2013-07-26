@@ -439,7 +439,7 @@ namespace
         {
             bool float_type = a->getType()->isFPOrFPVectorTy();
             CmpInst::OtherOps op = float_type ? Instruction::FCmp : Instruction::ICmp;
-            CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_ONE : CmpInst::ICMP_NE;
+            CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_OEQ : CmpInst::ICMP_EQ;
             CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name, insertBefore);
             return cmp;
         }
@@ -678,7 +678,7 @@ namespace
 
             if(sz(createdCheckInsts))
             {
-                Value * error = createReduction(Instruction::Or, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
+                Value * error = createReduction(Instruction::And, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
                 CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
         }
@@ -945,7 +945,57 @@ namespace
             call->setDoesNotThrow();
             return call;
         }
-        //Unifying code between EDDI_check_function and CFCSS_check_function
+        //Unifying code between the two check functions.
+        //Creates the basic blocks that test whether the check passes.
+        //These blocks are called a lot in the program and would be a good place for optimizations.
+        void createCheckBlocks(Module& module, Function** checkFunction, std::string& fnName, const char* error_name, const char* error_msg)
+        {
+
+            std::vector<Type*> Params;
+            std::vector<Value *> temp;
+
+            Params.pb(Type::getInt1Ty(context));
+
+            llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
+            module.getOrInsertFunction(fnName, ftype);
+
+            *checkFunction = module.getFunction(fnName);
+            Argument *check_value = &(*checkFunction)->getArgumentList().front();
+
+            BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", *checkFunction);
+            BasicBlock* bb2   = llvm::BasicBlock::Create(context, "return_block", *checkFunction);
+            BasicBlock* bb3   = llvm::BasicBlock::Create(context, "exit_block", *checkFunction);
+
+            // entry_block:
+            {
+                BranchInst::Create(bb2, bb3, check_value, entry);
+            }
+
+            // return_block:                                     ; preds = %for.end, %check_block
+            //     ret void
+
+            // return_block:
+                ReturnInst::Create(context, 0, bb2);
+
+            // exit_block:
+            {
+                std::vector<Value*> empty_vec;
+                createPrintfCall(error_name, error_msg, empty_vec, bb3, &module);
+            }
+
+            if(supportsCFTSS(QEDMode))
+            {
+                printLastBasicBlocks(module, *checkFunction, context, bb3, bb2);
+            }
+            else
+            {
+                createExitCall(one, bb3, &module);
+                BranchInst::Create(bb2, bb3);
+            }
+        }
+
+        //More unifying code between EDDI_check_function and CFCSS_check_function.
+        //This prints a stack trace of basic blocks for the failed check.
         void printLastBasicBlocks(Module& module, Function* checkFunction, LLVMContext& context, BasicBlock* exit_bb, BasicBlock* ret_bb)
         {
             if (NUM_ELEMENTS_IN_CFTSS_ARRAY == 1)
@@ -1076,120 +1126,12 @@ namespace
         void createEDDICheckFunction(Module &module)
         {
             assert(supportsEDDI(QEDMode));
-
-            std::vector<Type*> Params;
-            std::vector<Value *> temp;
-
-
-            Params.pb(Type::getInt1Ty(context));
-
-            llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
-            module.getOrInsertFunction(EDDI_CHECK_FUNCTION_NAME, ftype);
-
-            EDDICheckFunction = module.getFunction(EDDI_CHECK_FUNCTION_NAME);
-            Argument *check_value = &EDDICheckFunction->getArgumentList().front();
-            
-            BasicBlock *entry = llvm::BasicBlock::Create(context, "entry", EDDICheckFunction);
-            BasicBlock* bb1   = llvm::BasicBlock::Create(context, "check_block", EDDICheckFunction);
-            BasicBlock* bb2   = llvm::BasicBlock::Create(context, "return_block", EDDICheckFunction);
-            BasicBlock* bb3   = llvm::BasicBlock::Create(context, "exit_block", EDDICheckFunction);
-
-            //entry:
-            {
-                BasicBlock *currentBasicBlock = entry;
-                BranchInst::Create(bb1, currentBasicBlock);
-            }
-            // check_block:
-            {
-                BranchInst::Create(bb3, bb2, check_value, bb1); // BB1->BB2 or BB3
-            }
-
-            // return_block:                                     ; preds = %for.end, %check_block
-            //     ret void
-
-            // return_block:
-            {
-                ReturnInst::Create(context, 0, bb2);
-            }
-
-            // exit_block:
-            {
-                std::vector<Value *> v; v.clear();
-                createPrintfCall("eddimessage1", "EDDI Failed.\n", v, bb3, &module);
-            }
-
-            // If CFTSS is supported, we can print the last N basic blocks that got executed
-            if(supportsCFTSS(QEDMode))
-            {
-                // TODO:
-                // Why was this even here? This doesn't make any sense.
-                // If I remember rightly, this was added by me for debugging purposes.
-                // Check if it is needed
-
-                // Instruction *loaded_cftss_array_pos = new LoadInst(cftss_array_pos, "", bb3);
-                // Instruction *decrement              = BinaryOperator::Create(Instruction::Sub, loaded_cftss_array_pos, one, "dec", bb3);
-                // Instruction *mod_instruction        = BinaryOperator::Create(Instruction::URem, decrement, 
-                //                                     ConstantInt::get(i32, NUM_ELEMENTS_IN_CFTSS_ARRAY), "rem", bb3);
-                // new StoreInst(mod_instruction, cftss_array_pos, bb3);
-                printLastBasicBlocks(module, EDDICheckFunction, context, bb3, bb2);
-            }
-            else
-            {
-                createExitCall(one, bb3, &module);
-                BranchInst::Create(bb2, bb3);
-            }
+            createCheckBlocks(module, &EDDICheckFunction, EDDI_CHECK_FUNCTION_NAME, "eddimessage1", "EDDI Failed.\n");
         }
         void createCFCSSCheckFunction(Module &module)
         {
             assert (supportsCFCSS(CFCSS) && "CFCSS Check Function shouldn't be created");
-
-            std::vector<Type*> Params;
-            std::vector<Value *> temp;
-
-            Params.pb(Type::getInt1Ty(context));
-
-            llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
-            module.getOrInsertFunction(CFCSS_CHECK_FUNCTION_NAME, ftype);
-
-            CFCSSCheckFunction = module.getFunction(CFCSS_CHECK_FUNCTION_NAME);
-            Argument *check_value = &CFCSSCheckFunction->getArgumentList().front();
-            
-            BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", CFCSSCheckFunction);
-            BasicBlock* bb1   = llvm::BasicBlock::Create(context, "check_block", CFCSSCheckFunction);
-            BasicBlock* bb2   = llvm::BasicBlock::Create(context, "return_block", CFCSSCheckFunction);
-            BasicBlock* bb3   = llvm::BasicBlock::Create(context, "exit_block", CFCSSCheckFunction);
-
-            //entry:
-            {
-                BasicBlock *currentBasicBlock = entry;
-                BranchInst::Create(bb1, currentBasicBlock);
-            }
-            // check_block:
-            {
-                BranchInst::Create(bb2, bb3, check_value, bb1); // BB1->BB2 or BB3
-            }
-
-            // return_block:                                     ; preds = %for.end, %check_block
-            //     ret void
-
-            // return_block:
-                ReturnInst::Create(context, 0, bb2);
-
-            // exit_block:
-            {
-                std::vector<Value*> empty_vec;
-                createPrintfCall("cfcss_error_msg", "CFCSS Failed.\n", empty_vec, bb3, &module);
-            }
-
-            if(supportsCFTSS(QEDMode))
-            {
-                printLastBasicBlocks(module, CFCSSCheckFunction, context, bb3, bb2);
-            }
-            else
-            {
-                createExitCall(one, bb3, &module);
-                BranchInst::Create(bb2, bb3);
-            }
+            createCheckBlocks(module, &CFCSSCheckFunction, CFCSS_CHECK_FUNCTION_NAME, "cfcss_error_msg", "CFCSS Failed.\n");
         }
         ArrayType *getArrayType(Type *t, int N)
         {
@@ -1347,7 +1289,7 @@ namespace
                 createEDDICheckFunction(M);
 
             if (supportsCFCSS(QEDMode) || supportsGlobalCFCSS(QEDMode))
-                createCFCSSCheckFunction(M, bb_id_map);
+                createCFCSSCheckFunction(M);
 
 
             if (supportsEDDI(QEDMode))
