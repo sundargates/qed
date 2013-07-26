@@ -70,7 +70,8 @@ enum QEDLevel
     EDDI        = 0x1,
     CFTSS       = 0x2,
     CFCSS       = 0x4,
-    GlobalCFCSS = 0x8
+    GlobalCFCSS = 0x8,
+    Track_N     = 0x10
 };
 
 // Some Command Line Arguments will be parsed here
@@ -95,7 +96,7 @@ static cl::opt<int> QEDMode
 (
     "QED-Mode",
     cl::init(EDDI),
-    cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = GlobalCFCSS")
+    cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = GlobalCFCSS, Bit 5 = Store number of blocks seen")
 );
 
 static cl::opt<int> NUM_ELEMENTS_IN_CFTSS_ARRAY
@@ -153,8 +154,8 @@ namespace
             EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
 
-            assert ( (QEDMode<16) && "QED Mode cannot be greater than 15. Each bit represents one \
-                option and there are only four options to choose.");
+            assert ( (QEDMode<32) && "QED Mode cannot be greater than 31. Each bit represents one \
+                option and there are only five options to choose.");
 
             // errs()<<"\n";
             // if(supportsEDDI(QEDMode))
@@ -188,6 +189,10 @@ namespace
         bool supportsGlobalCFCSS(int QEDMode)
         {
             return QEDMode & GlobalCFCSS;
+        }
+        bool supportsNumBlocks(int QEDMode)
+        {
+            return QEDMode & Track_N;
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
@@ -735,12 +740,14 @@ namespace
             Value *tobestoredval                = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
 
             //Increment N indicating that the number of reached basic blocks is one more.
-            Instruction *loaded_cftss_array_n   = new LoadInst(cftss_array_n, "");
-            cftss_block.pb(loaded_cftss_array_n);
-            Instruction *increment_n            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_n, one);
-            cftss_block.pb(increment_n);
-            cftss_block.pb(new StoreInst(increment_n, cftss_array_n));
-
+            if (supportsNumBlocks(QEDMode))
+            { 
+                Instruction *loaded_cftss_array_n   = new LoadInst(cftss_array_n, "");
+                cftss_block.pb(loaded_cftss_array_n);
+                Instruction *increment_n            = BinaryOperator::Create(Instruction::Add, loaded_cftss_array_n, one);
+                cftss_block.pb(increment_n);
+                cftss_block.pb(new StoreInst(increment_n, cftss_array_n));
+            }
             if (NUM_ELEMENTS_IN_CFTSS_ARRAY > 1)
             {
             
@@ -1257,15 +1264,17 @@ namespace
                                                     "LAST_BB_ID"
                                                 );
                 }
-                cftss_array_n   = new GlobalVariable (
-                                                M, 
-                                                i32, 
-                                                false, 
-                                                GlobalValue::PrivateLinkage, 
-                                                i32_zero, 
-                                                "CFTSS_ARRAY_N"
-                                            );
-                
+                if (supportsNumBlocks(QEDMode))
+                {
+                    cftss_array_n   = new GlobalVariable (
+                                                    M, 
+                                                    i32, 
+                                                    false, 
+                                                    GlobalValue::PrivateLinkage, 
+                                                    i32_zero, 
+                                                    "CFTSS_ARRAY_N"
+                                                );
+                }
             }
             if(supportsGlobalCFCSS(QEDMode))
             {
