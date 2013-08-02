@@ -387,6 +387,9 @@ namespace
                     || (call && (call->isInlineAsm()))
                     || (call && F && (F->isIntrinsic()))
                     ;
+
+            if(inst->hasName() && inst->getName().find("_QED_CHECK_")!=std::string::npos)
+                success &= false;
             return success;
         }
         bool isPhi(Instruction *inst)
