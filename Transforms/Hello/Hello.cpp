@@ -121,6 +121,7 @@ namespace
         ConstantInt       * i1_false;
         ConstantInt       * i32_zero;
         int currentBasicBlock;
+        int NUM_QED_CHECKS_DONE;
         // int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
@@ -153,6 +154,7 @@ namespace
             EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
 
+            NUM_QED_CHECKS_DONE = 0;
             assert ( (QEDMode<16) && "QED Mode cannot be greater than 15. Each bit represents one \
                 option and there are only four options to choose.");
 
@@ -452,7 +454,7 @@ namespace
         }
         std::string makeName(Value * value, const char * suffix)
         {
-            return value->hasName() ? value->getName().str() + suffix : std::string();
+            return value->hasName() ? value->getName().str() + suffix : std::string(suffix);
         }
         Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
         {
@@ -598,30 +600,32 @@ namespace
         }
         bool needsToBeChecked (Instruction *I)
         {
-            // I->mayReturn() 
-            //             && hasOutput(I) 
-            //             && !isPhi(I) 
-            //             && !isGetElementPtrInst(I) 
-            //             && !isCastInst(I)
-            //             %% !
-
-            if(!I->mayReturn())
-                return false;
             if(!hasOutput(I))
                 return false;
-            if(isGetElementPtrInst(I))
-                return false;
-            if(isPhi(I))
-                return false;
+
             if(I->getType()->isPointerTy())
                 return false;
-            if(isCastInst(I))
-                return false;
+
             if(I->getType()->isVectorTy())
                 return false;
 
             return true;
 
+        }
+        std::string getString(int a)
+        {
+            std::stringstream s;
+            s<<a;
+
+            std::string res;
+            s>>res;
+
+            return res;
+        }
+        const char * getQEDCheckSuffix()
+        {
+            std::string temp = "_QED_CHECK_";
+            return (temp + getString(NUM_QED_CHECKS_DONE)).c_str();
         }
         void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
             std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
@@ -643,14 +647,17 @@ namespace
                 }
                 if(previous)
                 {
-                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
+                    Instruction *Previous = isPhi((Instruction *)iter)? (Instruction *)bb->getFirstInsertionPt() : (Instruction *)iter;
+                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()), Previous);
+
+                    NUM_QED_CHECKS_DONE ++;
+                    
                     createdCheckInsts.pb(cmp);
                     previous = false;
                 }
                 CallInst *call = dyn_cast<CallInst>(iter);
                 if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
                 {
-                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
                     modifyCallInstruction(call, map, toBeRemoved);
                 }
                 else
@@ -882,7 +889,6 @@ namespace
                             muxReturnInst(ret, map);
                     }
                 }
-
 
             }
 
@@ -1305,6 +1311,9 @@ namespace
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     cloneFunction(iter, map, bb_id_map, M);
+
+            if (supportsEDDI(QEDMode))
+                db(NUM_QED_CHECKS_DONE);
 
             if (supportsGlobalCFCSS(QEDMode))
                 FORE(iter, M)
