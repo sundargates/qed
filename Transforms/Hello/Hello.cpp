@@ -64,7 +64,7 @@ typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
-
+#define NUM_AVAIL_MODES 5
 enum QEDLevel
 {
     EDDI        = 0x1,
@@ -140,23 +140,26 @@ namespace
 
         Function          * CFCSSCheckFunction;
         std::string CFCSS_CHECK_FUNCTION_NAME;
+        std::string LOCAL_CFCSS_IDENTIFIER_STRING;
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
-            i1                        = Type::getInt1Ty(context);
-            i8                        = Type::getInt8Ty(context);
-            i32                       = Type::getInt32Ty(context);
-            i64                       = Type::getInt64Ty(context);
+            i1                            = Type::getInt1Ty(context);
+            i8                            = Type::getInt8Ty(context);
+            i32                           = Type::getInt32Ty(context);
+            i64                           = Type::getInt64Ty(context);
             
-            one                       = ConstantInt::get(Type::getInt32Ty(context),1);
-            i1_true                   = ConstantInt::get(i1, true);
-            i1_false                  = ConstantInt::get(i1, false);
-            i32_zero                  = ConstantInt::get(i32, 0);
-            EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
-            CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
+            one                           = ConstantInt::get(Type::getInt32Ty(context),1);
+            i1_true                       = ConstantInt::get(i1, true);
+            i1_false                      = ConstantInt::get(i1, false);
+            i32_zero                      = ConstantInt::get(i32, 0);
+            EDDI_CHECK_FUNCTION_NAME      = "eddi_check_function";
+            CFCSS_CHECK_FUNCTION_NAME     = "cfcss_check_function";
+            LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
 
-            NUM_QED_CHECKS_DONE = 0;
-            assert ( (QEDMode<32) && "QED Mode cannot be greater than 31. Each bit represents one \
+            NUM_QED_CHECKS_DONE           = 0;
+
+            assert ( (QEDMode<(1<<NUM_AVAIL_MODES)) && "QED Mode cannot be greater than 31. Each bit represents one \
                 option and there are only five options to choose.");
 
             // errs()<<"\n";
@@ -804,30 +807,78 @@ namespace
             for each(child, *root)
                 trackBlockTree(*child, bb_id_map);
         }
-        void controlFlowCheckBasicBlock(BasicBlock *bb, Value *last_cftss_id, std::map<BasicBlock *, int> &bb_id_map)
+        bool isEntryBlock(BasicBlock *bb)
         {
-            Value *tobestoredval   = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
-            BasicBlock::iterator I = bb->begin();
-            while (isPhi(I) || I==last_cftss_id) ++I;
-
-            new StoreInst (tobestoredval, last_cftss_id, I);
-
-            std::vector<int> possible_values;
-            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
+            BasicBlock &entryBlock = bb->getParent()->getEntryBlock();
+            return  &entryBlock == bb;
+        }
+        BasicBlock *getFirstPredecessor(BasicBlock *bb)
+        {
+            return *(pred_begin(bb));
+        }
+        int getNumPredecessors(BasicBlock *bb)
+        {
+            int res = 0;
+            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI)
+                res++;
+            return res;
+        }
+        void controlFlowCheckBasicBlock(BasicBlock *bb, Value *last_cfcss_id, std::map<BasicBlock *, int> &bb_id_map)
+        {
+            if(isEntryBlock(bb))
             {
-                BasicBlock *Pred = *PI;
-                possible_values.pb(get_value_from_map(Pred, bb_id_map));
+                Value *tobestoredval   = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+
+                BasicBlock::iterator I = bb->begin();
+                while (isPhi(I) || I==last_cfcss_id) ++I;
+
+                new StoreInst (tobestoredval, last_cfcss_id, I);
+                return;
             }
-            if (sz(possible_values))
+
+
+            Instruction *I = bb->getFirstInsertionPt();
+            PHINode *D;
+            // Not the entry block
+            // Insert a PhiNode to compensate for a fan-in node
+            if(!bb->getUniquePredecessor())
             {
-                createCFCSSChecks
-                    (
-                        possible_values, 
-                        bb->getFirstInsertionPt(), 
-                        last_cftss_id,
-                        makeName(bb, "_cfcss_checks")
-                    );
+                //D(i,m)   = S(i,m) ^ S(i,1)
+                int S1     = get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+                D = PHINode::Create(i32, 0, "D-PhiNode", bb->getFirstInsertionPt());
+
+                for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
+                {
+                    BasicBlock *Pred = *PI;
+                    // S(i,m)
+                    int S            = get_value_from_map(Pred, bb_id_map);
+                    Value *S_val     = ConstantInt::get(i32, S^S1, false);
+                    D->addIncoming(S_val, Pred);
+                }
             }
+
+            Value *signature                  = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+            int val                           = get_value_from_map(bb, bb_id_map) ^ get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+            Value *dj                         = ConstantInt::get(i32, val, false);;
+
+
+            // G                              = G ^ dj
+            Instruction *loaded_last_cfcss_id = new LoadInst(last_cfcss_id, makeName(bb, "_load_G"), I);
+            Instruction *computed_value       = BinaryOperator::Create(Instruction::Xor, loaded_last_cfcss_id, dj, "GxorDiff", I);
+
+            if(!bb->getUniquePredecessor())
+                computed_value = BinaryOperator::Create(Instruction::Xor, computed_value, D, "GxorD", I);
+
+            {
+                // br (G != Sj)
+                Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(bb, "_cfcss_check"), I);
+                new StoreInst (computed_value, last_cfcss_id, I);
+                std::vector<Value *> args;
+                args.pb(compare_instruction);
+                
+                CallInst::Create(CFCSSCheckFunction, args, "", I);
+            }
+
         }
         void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *last_cftss_id, std::map<BasicBlock *, int> bb_id_map)
         {
@@ -912,7 +963,7 @@ namespace
             if (supportsCFCSS(QEDMode))
             {
                 BasicBlock &entry = F->getEntryBlock();
-                Instruction *last_cftss_id = new AllocaInst (Type::getInt32Ty(context), 0, "LAST_CFTSS_ID", entry.getFirstInsertionPt());
+                Instruction *last_cftss_id = new AllocaInst (Type::getInt32Ty(context), 0, LOCAL_CFCSS_IDENTIFIER_STRING, entry.getFirstInsertionPt());
                 controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), last_cftss_id, bb_id_map);
             }
 
