@@ -823,6 +823,13 @@ namespace
                 res++;
             return res;
         }
+        bool hasReturnInstruction(BasicBlock *bb)
+        {
+            ReturnInst * ret = dyn_cast<ReturnInst>(bb->getTerminator());
+            if(ret)
+                return true;
+            return false;
+        }
         void controlFlowCheckBasicBlock(BasicBlock *bb, Value *last_cfcss_id, std::map<BasicBlock *, int> &bb_id_map)
         {
             if(isEntryBlock(bb))
@@ -869,15 +876,16 @@ namespace
             if(!bb->getUniquePredecessor())
                 computed_value = BinaryOperator::Create(Instruction::Xor, computed_value, D, "GxorD", I);
 
+            if(hasReturnInstruction(bb))
             {
                 // br (G != Sj)
                 Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(bb, "_cfcss_check"), I);
-                new StoreInst (computed_value, last_cfcss_id, I);
                 std::vector<Value *> args;
                 args.pb(compare_instruction);
                 
                 CallInst::Create(CFCSSCheckFunction, args, "", I);
             }
+            new StoreInst (computed_value, last_cfcss_id, I);
 
         }
         void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *last_cftss_id, std::map<BasicBlock *, int> bb_id_map)
