@@ -34,7 +34,6 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Analysis/Dominators.h"
 
-
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Constants.h"
@@ -64,14 +63,13 @@ typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
-
+#define NUM_AVAIL_MODES 4
 enum QEDLevel
 {
     EDDI        = 0x1,
     CFTSS       = 0x2,
     CFCSS       = 0x4,
-    GlobalCFCSS = 0x8,
-    Track_N     = 0x10
+    Track_N     = 0x8
 };
 
 // Some Command Line Arguments will be parsed here
@@ -96,7 +94,7 @@ static cl::opt<int> QEDMode
 (
     "QED-Mode",
     cl::init(EDDI),
-    cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = GlobalCFCSS, Bit 5 = Store number of blocks seen")
+    cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = Store number of blocks seen")
 );
 
 static cl::opt<int> NUM_ELEMENTS_IN_CFTSS_ARRAY
@@ -122,6 +120,7 @@ namespace
         ConstantInt       * i1_false;
         ConstantInt       * i32_zero;
         int currentBasicBlock;
+        int NUM_QED_CHECKS_DONE;
         // int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
@@ -130,35 +129,41 @@ namespace
         GlobalVariable    * cftss_array_pos;
         GlobalVariable    * cftss_array_n;
         GlobalVariable    * global_cfcss_id;
+        GlobalVariable    * global_difference_id;
 
         //This is only used if NUM_CFTSS_BBS = 1, so as to avoid using the array above.
         GlobalVariable    * last_bb_id; 
 
         Function          * EDDICheckFunction;
         std::string EDDI_CHECK_FUNCTION_NAME;
+        GlobalVariable    * EDDI_error_msg;
 
         Function          * CFCSSCheckFunction;
         std::string CFCSS_CHECK_FUNCTION_NAME;
+        std::string LOCAL_CFCSS_IDENTIFIER_STRING;
 
         Function          * ErrorReportingFn;
         std::string ERROR_REPORTER_NAME;
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
-            i1                        = Type::getInt1Ty(context);
-            i8                        = Type::getInt8Ty(context);
-            i32                       = Type::getInt32Ty(context);
-            i64                       = Type::getInt64Ty(context);
+            i1                            = Type::getInt1Ty(context);
+            i8                            = Type::getInt8Ty(context);
+            i32                           = Type::getInt32Ty(context);
+            i64                           = Type::getInt64Ty(context);
             
-            one                       = ConstantInt::get(Type::getInt32Ty(context),1);
-            i1_true                   = ConstantInt::get(i1, true);
-            i1_false                  = ConstantInt::get(i1, false);
-            i32_zero                  = ConstantInt::get(i32, 0);
-            EDDI_CHECK_FUNCTION_NAME  = "eddi_check_function";
-            CFCSS_CHECK_FUNCTION_NAME = "cfcss_check_function";
-            ERROR_REPORTER_NAME       = "error_detected";
+            one                           = ConstantInt::get(Type::getInt32Ty(context),1);
+            i1_true                       = ConstantInt::get(i1, true);
+            i1_false                      = ConstantInt::get(i1, false);
+            i32_zero                      = ConstantInt::get(i32, 0);
+            EDDI_CHECK_FUNCTION_NAME      = "eddi_check_function";
+            CFCSS_CHECK_FUNCTION_NAME     = "cfcss_check_function";
+            ERROR_REPORTER_NAME           = "error_detected";
+            LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
 
-            assert ( (QEDMode<32) && "QED Mode cannot be greater than 31. Each bit represents one \
+            NUM_QED_CHECKS_DONE           = 0;
+
+            assert ( (QEDMode<(1<<NUM_AVAIL_MODES)) && "QED Mode cannot be greater than 15. Each bit represents one \
                 option and there are only five options to choose.");
 
             // errs()<<"\n";
@@ -189,10 +194,6 @@ namespace
         bool supportsCFCSS(int QEDMode)
         {
             return QEDMode & CFCSS;
-        }
-        bool supportsGlobalCFCSS(int QEDMode)
-        {
-            return QEDMode & GlobalCFCSS;
         }
         bool supportsNumBlocks(int QEDMode)
         {
@@ -389,6 +390,9 @@ namespace
                     || (call && (call->isInlineAsm()))
                     || (call && F && (F->isIntrinsic()))
                     ;
+
+            if(inst->hasName() && inst->getName().find("_QED_CHECK_")!=std::string::npos)
+                success &= false;
             return success;
         }
         bool isPhi(Instruction *inst)
@@ -461,7 +465,7 @@ namespace
         }
         std::string makeName(Value * value, const char * suffix)
         {
-            return value->hasName() ? value->getName().str() + suffix : std::string();
+            return value->hasName() ? value->getName().str() + suffix : std::string(suffix);
         }
         Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
         {
@@ -575,11 +579,11 @@ namespace
                     return BinaryOperator::Create(op, input1, input2, name, insertBefore);
             }
         }
-        void createCFCSSChecks(
+        /*
+        Value* createCFCSSChecks(
                                     std::vector<int> possible_values,
                                     Instruction * insertBefore, 
                                     Value *last_cftss_id,
-                                    std::map<BasicBlock*, int> bb_id_map,
                                     const Twine & name = ""
                                 )
         {
@@ -592,58 +596,17 @@ namespace
             }
 
             Value *reduced_res = createReduction(Instruction::Or, res, insertBefore, name);
-            #if 0
-            BasicBlock* bb = insertBefore->getParent();
-            // Trying to make CFCSS checks faster. First issue: there may be multiple checks per block. Each needs
-            // unique IDs...
-            /*  br reduced_res fail, pass 
-                    (name_of_block_)cfcss_fail:
-                        call ErrorReportingFn
-                        br cfcss_pass
-                    (name_of_block_)cfcss_pass:
-                        (continue)
-            */
-            BasicBlock* passBlock = bb->splitBasicBlock(insertBefore, std::string("cfcss_pass"));
-            BasicBlock* failBlock = BasicBlock::Create(context, std::string("cfcss_fail"), bb->getParent(), passBlock);
-            std::vector<Value*> args;
-            //TODO this creates extra copies. I will want to fix that!
-            createPrintfCall("cfcssmessage1", "CFCSS Failed.\n", args, failBlock, bb->getParent()->getParent());
-            if (supportsCFTSS(QEDMode))
-            {
-                CallInst::Create(ErrorReportingFn, args, "", failBlock);
-            } else { //in which case we don't have the error-reporting function.
-                createExitCall(one, failBlock, bb->getParent()->getParent());
-            }
-            BranchInst::Create(failBlock, failBlock); //never reached, but necessary for correctness
-            //Note: ^^ isn't quite parallel with EDDI, and when factored use this one.
-            bb->getTerminator()->eraseFromParent();
-            BranchInst::Create(passBlock, failBlock, reduced_res, bb);
-
-            //I think this is necessary for CFCSS to work properly.
-            int id = get_value_from_map(bb, bb_id_map);
-            //bb_id_map[passBlock] = id;
-            //bb_id_map->insert(std::make_pair<BasicBlock*, int>(passBlock, id)); //if this is a pass-by-reference bug I will be angry
-            bb_id_map[passBlock] = id;
-            /*printf("Just inserted %s.%s into the map: value %d.\n", passBlock->getParent()->getName().data(),
-                                                          passBlock->getName().data(),
-                                                          get_value_from_map(passBlock, bb_id_map));
-            */
-            #endif
             std::vector<Value *> args;
             args.pb(reduced_res);
             // args.pb(ConstantInt::get(Type::getInt32Ty(context), current_basicblock_id, false));
-            CallInst* toReturn = CallInst::Create(CFCSSCheckFunction, args, "", insertBefore);
-            toReturn->setCallingConv(CallingConv::Fast);
-            //return toReturn;
+            return CallInst::Create(CFCSSCheckFunction, args, "", insertBefore);
         }
+        */
         int get_value_from_map(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
             if(!bb_id_map[bb])
             {
-                printf("Coudn't find basic block %s.%s in the map.\n", bb->getParent()->getName().data(), bb->getName().data());
-                for(std::map<BasicBlock*, int>::iterator i = bb_id_map.begin(); i != bb_id_map.end(); i++) {
-                    printf("\t%s.%s -> %d.\n", i->first->getParent()->getName().data(),i->first->getName().data(), i->second);
-                }
+                db(bb->getName());
                 db("The basic block does not exist in the map.");
                 exit(-1);
             }
@@ -651,37 +614,36 @@ namespace
         }
         bool needsToBeChecked (Instruction *I)
         {
-            // I->mayReturn() 
-            //             && hasOutput(I) 
-            //             && !isPhi(I) 
-            //             && !isGetElementPtrInst(I) 
-            //             && !isCastInst(I)
-            //             %% !
-
-            if(!I->mayReturn())
-                return false;
             if(!hasOutput(I))
                 return false;
-            if(isGetElementPtrInst(I))
-                return false;
-            if(isPhi(I))
-                return false;
+
             if(I->getType()->isPointerTy())
                 return false;
-            if(isCastInst(I))
-                return false;
+
             if(I->getType()->isVectorTy())
                 return false;
 
             return true;
 
         }
-        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
+        std::string getString(int a)
+        {
+            std::stringstream s;
+            s<<a;
+
+            std::string res;
+            s>>res;
+
+            return res;
+        }
+        const char * getQEDCheckSuffix()
+        {
+            std::string temp = "_QED_CHECK_";
+            return (temp + getString(NUM_QED_CHECKS_DONE)).c_str();
+        }
+        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int>& bb_id_map, 
             std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
-            if (bb->getName().endswith("_pass") || bb->getName().endswith("_fail") || bb->getName().startswith("cfcss_"))
-                return; //TODO factor
-            //printf("Cloning %s.%s.\n", bb->getParent()->getName().data(), bb->getName().data());
             // db(bb->getName());
             std::string bbname = bb->getName();
             Instruction *I; Instruction *NI;
@@ -699,15 +661,18 @@ namespace
                 }
                 if(previous)
                 {
-                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, "_check"), (Instruction *)iter);
+                    Instruction *Previous = isPhi((Instruction *)iter)? (Instruction *)bb->getFirstInsertionPt() : (Instruction *)iter;
+                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()), Previous);
+
+                    NUM_QED_CHECKS_DONE ++;
+                    
                     createdCheckInsts.pb(cmp);
                     previous = false;
                 }
                 CallInst *call = dyn_cast<CallInst>(iter);
                 if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
                 {
-                    // errs()<<"Replaced call for "<<call->getCalledFunction()<<"\n";
-                    modifyCallInstruction(call, map, toBeRemoved); //<-- this is where the problem is!
+                    modifyCallInstruction(call, map, toBeRemoved);
                 }
                 else
                 if(isCloneable(iter))
@@ -734,47 +699,11 @@ namespace
             if(sz(createdCheckInsts))
             {
                 Value * error = createReduction(Instruction::And, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
-                /*  br error fail, pass 
-                    (name_of_block_)fail:
-                        call ErrorReportingFn
-                        br pass
-                    (name_of_block_)pass:
-                        br (wherever it goes) -- it would be nice to optimize this.
-
-                I might also be able to unify the code somewhat.
-                 */   
-                    BasicBlock* passBlock = bb->splitBasicBlock(bb->getTerminator(), bb->getName() + std::string("_pass"));
-                    BasicBlock* failBlock = BasicBlock::Create(context, bb->getName() + std::string("_fail"), bb->getParent(), passBlock);
-                    std::vector<Value*> args;
-                    //TODO this creates extra copies. I will want to fix that!
-                    createPrintfCall("eddimessage1", "EDDI Failed.\n", args, failBlock, M);
-                    /*
-                        ...where format is the GlobalVariable* that I already have
-                        std::vector<Value *> arg_list;
-                        Value * zero_zero[] = { i32_zero, i32_zero };
-                        arg_list.push_back(ConstantExpr::getInBoundsGetElementPtr(format, zero_zero));
-                        arg_list.insert(arg_list.end(), args.begin(), args.end());
-
-                        CallInst * call = CallInst::Create(printf_func, arg_list, "", block);
-                        call->setDoesNotThrow();
-                      */
-                    if (supportsCFTSS(QEDMode))
-                    {
-                        CallInst::Create(ErrorReportingFn, args, "", failBlock);
-                    } else { //in which case we don't have the error-reporting function.
-                        createExitCall(one, failBlock, M);
-                    }
-                    BranchInst::Create(failBlock, failBlock); //never reached, but necessary for correctness
-                    bb->getTerminator()->eraseFromParent();
-                    BranchInst::Create(passBlock, failBlock, error, bb);
-                /*
-                CallInst* eddi_call = CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
-                eddi_call->setCallingConv(CallingConv::Fast);
-                */
+                CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
         }
         void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, 
-            ValueDuplicateMap & map, std::map<BasicBlock *, int> bb_id_map, 
+            ValueDuplicateMap & map, std::map<BasicBlock *, int>& bb_id_map, 
             std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             cloneBasicBlock(root->getBlock(), function, M, map, bb_id_map, toBeReplaced);
@@ -799,20 +728,12 @@ namespace
             for each(child, *root)
                 mapBlockTree(*child, bb_id_map);
         }
-        std::string int_to_string(int a)
-        {
-            std::stringstream s;
-            s<<a;
-            std::string res;
-            s>>res;
-            return res;
-        }
         Instruction* storeID(BasicBlock* bb, Value* tobestoredval, Value* tostorein, std::map<BasicBlock*, int>& bb_id_map)
         {
             Instruction *store_inst = new StoreInst (tobestoredval, tostorein);
             {
                 LLVMContext& C = store_inst->getContext();
-                std::string bbid = int_to_string(get_value_from_map(bb, bb_id_map));
+                std::string bbid = getString(get_value_from_map(bb, bb_id_map));
                 std::string temp = "BasicBlockID-" + bbid;
                 MDNode* N = MDNode::get(C, tobestoredval);
                 store_inst->setMetadata(temp, N);
@@ -821,10 +742,6 @@ namespace
         }
         void trackBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
-            if (bb->getName().endswith("_pass") || bb->getName().endswith("_fail"))
-            {
-                return;
-            } 
             std::vector<Instruction *> cftss_block;
             
             Value *tobestoredval                = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
@@ -878,75 +795,162 @@ namespace
         }
         void trackBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
-
             trackBasicBlock(root->getBlock(), bb_id_map);
 
             for each(child, *root)
                 trackBlockTree(*child, bb_id_map);
         }
-        void controlFlowCheckBasicBlock(BasicBlock *bb, Value *last_cftss_id, std::map<BasicBlock *, int> &bb_id_map)
+        bool isEntryBlock(BasicBlock *bb)
         {
-            if (bb->getName().endswith("_pass") || bb->getName().endswith("_fail") || bb->getName().startswith("cfcss_"))
-            {
-                return; //TODO factor out and check that it's necessary
-            }
-            Value *tobestoredval   = ConstantInt::get(Type::getInt32Ty(context), get_value_from_map(bb, bb_id_map), false);
-            BasicBlock::iterator I = bb->begin();
-            while (isPhi(I) || I==last_cftss_id) ++I;
-
-            new StoreInst (tobestoredval, last_cftss_id, I);
-
-            std::vector<int> possible_values;
-            //AHA! Here I want to take every 'pass' predicate and replace it with _its_ non-fail predicate.
-            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
-            {
-                BasicBlock *Pred = *PI;
-                if (Pred->getName().startswith("cfcss_")) //CFCSS pass block: we need prerequisites
-                {
-                    BasicBlock* passPred = *pred_begin(Pred); //there's only the one prereq
-                    possible_values.pb(get_value_from_map(passPred, bb_id_map));
-                }
-                //TODO else?
-                else if (!(Pred->getName().endswith("_pass") || Pred->getName().endswith("_fail"))) //not clear if this exists yet
-                {
-                    possible_values.pb(get_value_from_map(Pred, bb_id_map));
-                }
-            }
-            if (sz(possible_values))
-            {
-                createCFCSSChecks
-                    (
-                        possible_values, 
-                        bb->getFirstInsertionPt(), 
-                        last_cftss_id,
-                        bb_id_map,
-                        makeName(bb, "_cfcss_checks")
-                    );
-            }
+            BasicBlock &entryBlock = bb->getParent()->getEntryBlock();
+            return  &entryBlock == bb;
         }
-        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *last_cftss_id, std::map<BasicBlock *, int> bb_id_map)
+        BasicBlock *getFirstPredecessor(BasicBlock *bb)
+        {
+            return *(pred_begin(bb));
+        }
+        int getNumPredecessors(BasicBlock *bb)
+        {
+            int res = 0;
+            for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI)
+                res++;
+            return res;
+        }
+        bool hasReturnInstruction(BasicBlock *bb)
+        {
+            return true;
+            // ReturnInst * ret = dyn_cast<ReturnInst>(bb->getTerminator());
+            // if(ret)
+            //     return true;
+            // return false;
+        }
+        BasicBlock *getFirstCaller(Function *F)
+        {
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                if(Call)
+                    return Call->getParent();
+            }
+
+            return NULL;
+        }
+        bool hasManyCallers(Function *F)
+        {
+            int res = 0;
+            for each_custom(iter, *F, use_begin, use_end)
+            {
+                CallSite CS(*iter);
+                Instruction *Call = CS.getInstruction();
+                if(Call)
+                    res++;
+            }
+            return res>1;
+        }
+        void controlFlowCheckBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
+        {
+            Instruction *I = bb->getFirstInsertionPt();
+            if(isEntryBlock(bb))
+            {
+                Value *signature = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+                Function *F      = bb->getParent();
+                int val;
+                if(getFirstCaller(F))
+                    val          = get_value_from_map(bb, bb_id_map) ^ get_value_from_map(getFirstCaller(F), bb_id_map);
+                else
+                    val = get_value_from_map(bb, bb_id_map);
+                Value *dj        = ConstantInt::get(i32, val, false);
+
+                // G                                = G ^ dj
+                Instruction *loaded_global_cfcss_id = new LoadInst(global_cfcss_id, makeName(F, "_load_G"), I);
+                Instruction *computed_value         = BinaryOperator::Create(Instruction::Xor, loaded_global_cfcss_id, dj, "GxorDJ", I);
+
+                if(hasManyCallers(F))
+                {
+                    Instruction *loaded_D = new LoadInst(global_difference_id, makeName(F, "_load_D"), I);
+                    computed_value        = BinaryOperator::Create(Instruction::Xor, computed_value, loaded_D, "GxorDIFF", I);
+                }
+
+                {
+                    // br (G != Sj)
+                    Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(F, "_cfcss_check"), I);
+
+                    std::vector<Value *> args;
+                    args.pb(compare_instruction);
+                    
+                    CallInst::Create(CFCSSCheckFunction, args, "", I);
+                }
+                new StoreInst (computed_value, global_cfcss_id, I);
+                return;
+            }
+
+
+            PHINode *D;
+            // Not the entry block
+            // Insert a PhiNode to compensate for a fan-in node
+            if(!bb->getUniquePredecessor())
+            {
+                //D(i,m)   = S(i,m) ^ S(i,1)
+                int S1     = get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+                D = PHINode::Create(i32, 0, "D-PhiNode", bb->getFirstInsertionPt());
+
+                for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
+                {
+                    BasicBlock *Pred = *PI;
+                    // S(i,m)
+                    int S            = get_value_from_map(Pred, bb_id_map);
+                    Value *S_val     = ConstantInt::get(i32, S^S1, false);
+                    D->addIncoming(S_val, Pred);
+                }
+            }
+
+            Value *signature                  = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+            int val                           = get_value_from_map(bb, bb_id_map) ^ get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+            Value *dj                         = ConstantInt::get(i32, val, false);;
+
+
+            // G                              = G ^ dj
+            Instruction *loaded_last_cfcss_id = new LoadInst(global_cfcss_id, makeName(bb, "_load_G"), I);
+            Instruction *computed_value       = BinaryOperator::Create(Instruction::Xor, loaded_last_cfcss_id, dj, "GxorDiff", I);
+
+            if(!bb->getUniquePredecessor())
+                computed_value = BinaryOperator::Create(Instruction::Xor, computed_value, D, "GxorD", I);
+
+            if(hasReturnInstruction(bb))
+            {
+                // br (G != Sj)
+                Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(bb, "_cfcss_check"), I);
+                std::vector<Value *> args;
+                args.pb(compare_instruction);
+                
+                CallInst::Create(CFCSSCheckFunction, args, "", I);
+            }
+            new StoreInst (computed_value, global_cfcss_id, I);
+        }
+        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
             assert(supportsCFCSS(QEDMode) && "This mode shouldn't use CFCSS");
-            controlFlowCheckBasicBlock(root->getBlock(), last_cftss_id, bb_id_map);
+            controlFlowCheckBasicBlock(root->getBlock(), bb_id_map);
 
             for each(child, *root)
-                controlFlowCheckBlockTree(*child, last_cftss_id, bb_id_map);
+                controlFlowCheckBlockTree(*child, bb_id_map);
         }
         void printName(Value *v)
         {
             errs()<<v->getName()<<"\n";
         }
 
-
         void mapFunctionBasicBlocks(Function *F, std::map<BasicBlock *, int> &bb_id_map, Module &M)
         {
             DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
             mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
         }
+        //This function now assumes supportsEDDI(QEDMode) == true
         void cloneFunction(Function *F, ValueDuplicateMap & global_map, std::map<BasicBlock *, int> &bb_id_map, Module &M)
         {
             //TODO: Can do better than this.
-            if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME)
+            if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME || F->getName() == ERROR_REPORTER_NAME)
                 return;
 
             // db(F->getName());;
@@ -957,55 +961,34 @@ namespace
             DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
             ValueDuplicateMap map;
             map.insert(global_map.begin(), global_map.end());
-
-            // mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
-
-
-            // Start allocating IDs to basic blocks if the user expects CFTSS
-            if (supportsCFTSS(QEDMode))
-                trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
-
-            if (supportsCFCSS(QEDMode))
+            
+            // EDDI_V!
+            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
+            
+            // Phi-Node handler
+            FORN(i,sz(toBeReplaced))
             {
-                BasicBlock &entry = F->getEntryBlock();
-                Instruction *last_cftss_id = new AllocaInst (Type::getInt32Ty(context), 0, "LAST_CFTSS_ID", entry.getFirstInsertionPt());
-                controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), last_cftss_id, bb_id_map);
-            }
-
-            //This is EDDI-V essentially.
-            if(supportsEDDI(QEDMode))
-            {
-
-                // EDDI_V!
-                cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
-
-                // Phi-Node handler
-                FORN(i,sz(toBeReplaced))
-                {
-                    std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
-                    if(t.second)
-                        if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
-                        {
-                            db("Error on Replacing");
-                            exit(-1);
-                        }
-                }
-
-                // Replace the return instructions
-                // This has to be done last because you may not have replicated everything if you just replace 
-                // the return instruction in cloneBasicBlock
-                if (prototypeNeedsToBeModified(F))
-                {
-                    FORE(iter, (*F))
+                std::pair<Value *, bool> t = mapValue(toBeReplaced[i].second, map);
+                if(t.second)
+                    if(!remapOperand(toBeReplaced[i].first, toBeReplaced[i].second, t.first))
                     {
-                        ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
-                        if (ret && ret->getReturnValue())
-                            muxReturnInst(ret, map);
+                        db("Error on Replacing");
+                        exit(-1);
                     }
-                }
-
             }
 
+            // Replace the return instructions
+            // This has to be done last because you may not have replicated everything if you just replace 
+            // the return instruction in cloneBasicBlock
+            if (prototypeNeedsToBeModified(F))
+            {
+                FORE(iter, (*F))
+                {
+                    ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                    if (ret && ret->getReturnValue())
+                        muxReturnInst(ret, map);
+                }
+            }
         }
         Constant * createStringConstant(const std::string & string)
         {
@@ -1056,7 +1039,6 @@ namespace
         //These blocks are called a lot in the program and would be a good place for optimizations.
         void createCheckBlocks(Module& module, Function** checkFunction, std::string& fnName, const char* error_name, const char* error_msg)
         {
-
             std::vector<Type*> Params;
             std::vector<Value *> temp;
 
@@ -1066,7 +1048,6 @@ namespace
             module.getOrInsertFunction(fnName, ftype);
 
             *checkFunction = module.getFunction(fnName);
-            (*checkFunction)->setCallingConv(CallingConv::Fast);
             Argument *check_value = &(*checkFunction)->getArgumentList().front();
 
             BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", *checkFunction);
@@ -1123,8 +1104,18 @@ namespace
             llvm::FunctionType* ftype = llvm::FunctionType::get(Type::getVoidTy(context), Params, false);
             module.getOrInsertFunction(ERROR_REPORTER_NAME, ftype);
             ErrorReportingFn = module.getFunction(ERROR_REPORTER_NAME);
-            //it remains to be seen if this is the smartest way through. But it makes sense
             BasicBlock* entry_bb = llvm::BasicBlock::Create(context, "entry", ErrorReportingFn);
+
+            if (NUM_ELEMENTS_IN_CFTSS_ARRAY == 1) //much less machinery to create
+            {
+                Instruction* loaded_id = new LoadInst(last_bb_id, "", entry_bb);
+                std::vector<Value*> temp;
+                temp.push_back(loaded_id);
+                createPrintfCall("cfcssmessage1", "Basic Block ID = %d\t", temp, entry_bb, &module);
+                createExitCall(one, entry_bb, &module);
+                ReturnInst::Create(context, 0, entry_bb);
+                return;
+            }
             Instruction *i_iter = new AllocaInst (Type::getInt32Ty(context), 0, "i", entry_bb);
             new StoreInst(i32_zero, i_iter, entry_bb);
 
@@ -1242,24 +1233,14 @@ namespace
 
         void createCFCSSCheckFunction(Module &module)
         {
-            assert (supportsCFCSS(CFCSS) && "CFCSS Check Function shouldn't be created");
+            assert (supportsCFCSS(QEDMode) && "CFCSS Check Function shouldn't be created");
             createCheckBlocks(module, &CFCSSCheckFunction, CFCSS_CHECK_FUNCTION_NAME, "cfcss_error_msg", "CFCSS Failed.\n");
         }
-        int valueWrapper(BasicBlock* bb, std::map<BasicBlock*, int>& bb_id_map) {
-            if (bb->getName().startswith("cfcss_") || bb->getName().endswith("_pass"))
-            {
-                BasicBlock* passPred = *pred_begin(bb); //there's only the one prereq
-                if (passPred->getName().endswith("_pass")) passPred = *pred_begin(passPred);
-                //TODO write this down and check that it makes sense.
-                //printf("Called by %s <- %s.\n", caller->getParent()->getName().data(),
-                //    passPred->getName().data());
-                return get_value_from_map(passPred, bb_id_map);
-            } else {
-                //printf("Called by %s.\n", caller->getParent()->getName().data());
-                return get_value_from_map(bb, bb_id_map);
-            }
+        void createEDDICheckFunction(Module &module)
+        {
+            assert (supportsEDDI(QEDMode) && "EDDI Check Function shouldn't be created");
+            createCheckBlocks(module, &EDDICheckFunction, EDDI_CHECK_FUNCTION_NAME, "EDDI_error_msg", "EDDI Failed.\n");
         }
-
         ArrayType *getArrayType(Type *t, int N)
         {
             return ArrayType::get(t, N);
@@ -1270,7 +1251,8 @@ namespace
                 return false;
             if(F->getName() == CFCSS_CHECK_FUNCTION_NAME)
                 return false;
-            if(F->getName() == ERROR_REPORTER_NAME) return false;
+            if(F->getName() == ERROR_REPORTER_NAME)
+                return false;
             return true;
         }
  
@@ -1280,34 +1262,27 @@ namespace
             for each_custom(iter, *F, use_begin, use_end)
             {
                 CallInst* caller = dyn_cast<CallInst>(*iter);
-                if (caller) {
-                    if (caller->getParent()->getName().startswith("cfcss_") || caller->getParent()->getName().endswith("_pass"))
-                    {
-                        BasicBlock* passPred = *pred_begin(caller->getParent()); //there's only the one prereq
-                        if (passPred->getName().endswith("_pass")) passPred = *pred_begin(passPred);
-                        //TODO write this down and check that it makes sense.
-                        //printf("Called by %s <- %s.\n", caller->getParent()->getName().data(),
-                        //    passPred->getName().data());
-                        res.pb(get_value_from_map(passPred, bb_id_map));
-                    } else {
-                        //printf("Called by %s.\n", caller->getParent()->getName().data());
-                        res.pb(get_value_from_map(caller->getParent(), bb_id_map));
-                    }
-                }
+                if (caller)
+                    res.pb(get_value_from_map(caller->getParent(), bb_id_map));
             }
             return res;
         }
         void insertStoresBeforeCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
+            if(!hasManyCallers(F))
+                return;
+
+            int S1     = get_value_from_map(getFirstCaller(F), bb_id_map);
             for each_custom(iter, *F, use_begin, use_end)
             {
                 CallSite CS(*iter);
                 Instruction *Call = CS.getInstruction();
                 if(Call)
                 {
-                    int bbid             = valueWrapper(Call->getParent(), bb_id_map);//get_value_from_map(Call->getParent(), bb_id_map);
-                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
-                    new StoreInst(tobestoredval, global_cfcss_id, Call);
+                    int S        = get_value_from_map(Call->getParent(), bb_id_map);
+                    //D(i,m)     = S(i,m) ^ S(i,1)
+                    Value *S_val = ConstantInt::get(i32, S^S1, false);
+                    new StoreInst(S_val, global_difference_id, Call);
                 }
             }
         }
@@ -1317,46 +1292,91 @@ namespace
             FORE(iter, (*F))
             {
                 ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
-                if (ret && ret->getReturnValue() && ret->getParent()!=NULL && bb_id_map[ret->getParent()])
-                    //res.pb(get_value_from_map(ret->getParent(), bb_id_map));
-                    res.pb(valueWrapper(ret->getParent(), bb_id_map));
+                if (ret && ret->getParent()!=NULL && bb_id_map[ret->getParent()])
+                    res.pb(get_value_from_map(ret->getParent(), bb_id_map));
             }
             return res;
         }
-
-        void insertStoresBeforeExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        bool hasManyExits(Function *F)
+        {
+            int res = 0;
+            FORE(iter, (*F))
+            {
+                ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                if (ret && ret->getParent()!=NULL)
+                    res ++;
+            }
+            return res > 1;
+        }
+        BasicBlock *getFirstExit(Function *F)
         {
             FORE(iter, (*F))
             {
                 ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
-                if (ret && ret->getReturnValue() && ret->getParent()!=NULL && bb_id_map[ret->getParent()])
+                if (ret && ret->getParent()!=NULL)
+                    return ret->getParent();
+            }
+            return NULL;
+        }
+        void insertStoresBeforeExits(Function *F, std::map<BasicBlock *, int> bb_id_map)
+        {
+            if(!hasManyExits(F))
+                return;
+
+            FORE(iter, (*F))
+            {
+                ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
+                if (ret && ret->getParent()!=NULL && bb_id_map[ret->getParent()])
                 {
-                    //int bbid = get_value_from_map(ret->getParent(), bb_id_map);
-                    int bbid = valueWrapper(ret->getParent(), bb_id_map);
-                    Value *tobestoredval = ConstantInt::get(i32, bbid, false);
-                    new StoreInst(tobestoredval, global_cfcss_id, ret);
+                    int S  = get_value_from_map(ret->getParent(), bb_id_map);
+                    int S1 = get_value_from_map(getFirstExit(F), bb_id_map);
+                    //D(i,m)     = S(i,m) ^ S(i,1)
+                    Value *S_val = ConstantInt::get(i32, S^S1, false);
+                    new StoreInst(S_val, global_difference_id, ret);
                 }
             }
         }
         void insertChecksAfterCalls(Function *F, std::map<BasicBlock *, int> bb_id_map)
         {
-            std::vector<int> exitBasicBlocks = returnExits(F, bb_id_map);
             for each_custom(iter, *F, use_begin, use_end)
             {
                 CallSite CS(*iter);
                 Instruction *Call = CS.getInstruction();
-                Instruction *nextInstruction = getNextInstruction(Call);
-                if(nextInstruction && Call && sz(exitBasicBlocks))
+                //Indirect calls will have to be ignored.
+                if (Call == NULL) continue;
+                Instruction *I = getNextInstruction(Call);
+
+                BasicBlock *bb = Call->getParent();
+                assert(bb!=NULL);
+
+                Value *signature = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+                int val;
+                if (getFirstExit(F) && bb_id_map[getFirstExit(F)])
+                    val          = get_value_from_map(bb, bb_id_map) ^ get_value_from_map(getFirstExit(F), bb_id_map);
+                else
+                    val = get_value_from_map(bb, bb_id_map);
+                Value *dj        = ConstantInt::get(i32, val, false);
+
+                // G                                = G ^ dj
+                Instruction *loaded_global_cfcss_id = new LoadInst(global_cfcss_id, makeName(F, "_load_G"), I);
+                Instruction *computed_value         = BinaryOperator::Create(Instruction::Xor, loaded_global_cfcss_id, dj, "GxorDJ", I);
+
+                if(hasManyExits(F))
                 {
-                    createCFCSSChecks 
-                        (                                
-                            exitBasicBlocks,    // std::vector<int> possible_values,
-                            nextInstruction,    // Instruction * insertBefore,
-                            global_cfcss_id,    // Value *last_cftss_id,
-                            bb_id_map,          // std::map<BasicBlock*, int>& bb_id_map,
-                            "exit_cfcss_checks" // const Twine & name = ""
-                        );
+                    Instruction *loaded_D = new LoadInst(global_difference_id, makeName(F, "_load_D"), I);
+                    computed_value        = BinaryOperator::Create(Instruction::Xor, computed_value, loaded_D, "GxorDIFF", I);
                 }
+
+                {
+                    // br (G != Sj)
+                    Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(F, "_function_cfcss_check"), I);
+
+                    std::vector<Value *> args;
+                    args.pb(compare_instruction);
+                    
+                    CallInst::Create(CFCSSCheckFunction, args, "", I);
+                }
+                new StoreInst(computed_value, global_cfcss_id, I);
             }
         }
         bool runOnModule(Module &M)
@@ -1401,19 +1421,20 @@ namespace
                                                     "LAST_BB_ID"
                                                 );
                 }
-                if (supportsNumBlocks(QEDMode))
-                {
-                    cftss_array_n   = new GlobalVariable (
-                                                    M, 
-                                                    i32, 
-                                                    false, 
-                                                    GlobalValue::PrivateLinkage, 
-                                                    i32_zero, 
-                                                    "CFTSS_ARRAY_N"
-                                                );
-                }
             }
-            if(supportsGlobalCFCSS(QEDMode))
+            if (supportsNumBlocks(QEDMode))
+            {
+                cftss_array_n   = new GlobalVariable (
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero, 
+                                                "CFTSS_ARRAY_N"
+                                            );
+            }
+
+            if(supportsCFCSS(QEDMode))
             {
                 global_cfcss_id = new GlobalVariable (
                                                 M, 
@@ -1423,59 +1444,71 @@ namespace
                                                 i32_zero,
                                                 "GLOBAL_CFCSS_ID"
                                             );
+
+                global_difference_id = new GlobalVariable (
+                                                M, 
+                                                i32, 
+                                                false, 
+                                                GlobalValue::PrivateLinkage, 
+                                                i32_zero,
+                                                "GLOBAL_D"
+                                            );
                 // cftss_id->setThreadLocal(true);
             }
-
             std::map<BasicBlock *, int> bb_id_map;
             FORE(iter, M)
                 if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     mapFunctionBasicBlocks(iter, bb_id_map, M);
 
-            if (supportsEDDI(QEDMode))
-            {
-                FORE(iter, M)
-                    if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
-                    {
-                        modifyPrototype(iter,map);
-                    }
-            }
-
             if (supportsCFTSS(QEDMode))
                 createErrorReportingFunction(M);
 
-            if (supportsCFCSS(QEDMode) || supportsGlobalCFCSS(QEDMode))
+            if (supportsCFCSS(QEDMode))
                 createCFCSSCheckFunction(M);
 
+            if (supportsEDDI(QEDMode))
+            {
+                createEDDICheckFunction(M);
+                db(NUM_QED_CHECKS_DONE);
 
-            
-
-            // Iterate over all the functions and clone them
-            FORE(iter, M)
-                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                    cloneFunction(iter, map, bb_id_map, M);
-
-            if (supportsGlobalCFCSS(QEDMode))
                 FORE(iter, M)
+                    if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
+                        modifyPrototype(iter,map);
+                // Iterate over all the functions and clone them
+                FORE(iter, M)
+                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                        cloneFunction(iter, map, bb_id_map, M);
+            }
+
+            // Start allocating IDs to basic blocks if the user expects CFTSS
+            if (supportsCFTSS(QEDMode))
+            {
+                FORE(iter, M)
+                {
+                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    {
+                        DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*iter);
+                        trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+                    }
+                }
+            }
+
+            if (supportsCFCSS(QEDMode))
+            {
+                FORE(iter, M)
+                {
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                     {
                         Function *F = iter;
-                        std::vector<int> callers = returnCallers(iter, bb_id_map);
-                        if(sz(callers))
-                            createCFCSSChecks 
-                                (                                
-                                    callers,                                       // std::vector<int> possible_values,
-                                    F->getEntryBlock().getFirstInsertionPt(),      // Instruction * insertBefore,
-                                    global_cfcss_id,                               // Value *last_cftss_id,
-                                    bb_id_map,                                     // std::map<BasicBlock*, int>& bb_id_map,
-                                    makeName(&F->getEntryBlock(), "_cfcss_checks") // const Twine & name = ""
-                                );
+                        DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
+                        controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
 
-                    insertStoresBeforeCalls (F, bb_id_map);
-                    insertStoresBeforeExits (F, bb_id_map);
-                    insertChecksAfterCalls  (F, bb_id_map);
+                        insertStoresBeforeCalls (F, bb_id_map);
+                        insertStoresBeforeExits (F, bb_id_map);
+                        insertChecksAfterCalls  (F, bb_id_map);
+                    }
                 }
-
-            //M.dump();
+            }
 
             return true;
         }
@@ -1487,4 +1520,3 @@ namespace
 }
 char QED::ID = 0;
 static RegisterPass<QED> X("hello", "Hello World Pass");
-
