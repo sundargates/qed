@@ -61,6 +61,7 @@ typedef long long ll;
 typedef std::vector<int> vi;
 typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
+typedef std::map<Value *, bool> ValueBoolMap;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
 #define NUM_AVAIL_MODES 4
@@ -379,6 +380,16 @@ namespace
             // errs()<<"The above operand does not have a replacement?\n";
             return mp(value, false);
         }
+        bool isHeapCall(Function* F)
+        {
+            return F->getName().equals(StringRef("malloc")) ||
+                   F->getName().equals(StringRef("calloc")) ||
+                   F->getName().equals(StringRef("realloc")) ||
+                   //I thought that would be sufficient, but...
+                   //You may also need pvalloc, cfree, memalign, posix_memalign
+                   F->getName().equals(StringRef("valloc")) ||
+                   F->getName().equals(StringRef("free"));
+        }
         bool isCloneable(Instruction *inst)
         {
             bool success = true;
@@ -388,6 +399,7 @@ namespace
             Function *F = call?call->getCalledFunction():NULL;
             success &= !call 
                     || (call && (call->isInlineAsm()))
+                    || (call && F && isHeapCall(F))
                     || (call && F && (F->isIntrinsic()))
                     ;
 
@@ -465,7 +477,7 @@ namespace
         }
         std::string makeName(Value * value, const char * suffix)
         {
-            return value->hasName() ? value->getName().str() + suffix : std::string(suffix);
+            return value->hasName() ? value->getName().str() + std::string(suffix) : std::string(suffix);
         }
         Function * getExternalFunction(StringRef name, FunctionType * type, Module * module)
         {
@@ -612,7 +624,31 @@ namespace
             }
             return bb_id_map[bb];
         }
-        bool needsToBeChecked (Instruction *I)
+
+        bool isPointer(Value *V, ValueBoolMap &map)
+        {
+            assert (V && "Value cannot be NULL");
+
+            if (dyn_cast<PtrToIntInst>(V))
+                return true;
+
+            if(map.find(V)!=map.end())
+                return map[V];
+
+            map[V] = false;
+
+            bool &success = map[V];
+            Instruction * I = dyn_cast<Instruction>(V);
+            if(I) 
+            {
+                for each_custom(operand, *I, op_begin, op_end)
+                    success |= isPointer(*operand, map);
+            }
+
+            return success;
+        }
+
+        bool needsToBeChecked (Instruction *I, ValueBoolMap &value_pointer_map)
         {
             if(!hasOutput(I))
                 return false;
@@ -621,6 +657,9 @@ namespace
                 return false;
 
             if(I->getType()->isVectorTy())
+                return false;
+
+            if(isPointer(I, value_pointer_map))
                 return false;
 
             return true;
@@ -641,7 +680,7 @@ namespace
             std::string temp = "_QED_CHECK_";
             return (temp + getString(NUM_QED_CHECKS_DONE)).c_str();
         }
-        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, std::map<BasicBlock *, int>& bb_id_map, 
+        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int>& bb_id_map, 
             std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
         {
             // db(bb->getName());
@@ -687,7 +726,7 @@ namespace
                     NI->insertAfter(I);
                     skip++;
 
-                    if(needsToBeChecked(I))
+                    if(needsToBeChecked(I, value_pointer_map))
                             previous = true;
                 }
             }
@@ -702,13 +741,18 @@ namespace
                 CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
         }
-        void cloneBlockTree(DomTreeNodeBase<BasicBlock> * root, Function * function, Module *M, 
-            ValueDuplicateMap & map, std::map<BasicBlock *, int>& bb_id_map, 
-            std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
+        void cloneBlockTree (
+                DomTreeNodeBase<BasicBlock> * root, 
+                Function * function, Module *M, 
+                ValueDuplicateMap & map, 
+                ValueBoolMap & value_pointer_map,
+                std::map<BasicBlock *, int>& bb_id_map, 
+                std::vector< std::pair<Instruction *, Value *> > &toBeReplaced
+            )
         {
-            cloneBasicBlock(root->getBlock(), function, M, map, bb_id_map, toBeReplaced);
+            cloneBasicBlock(root->getBlock(), function, M, map, value_pointer_map, bb_id_map, toBeReplaced);
             for each(child, *root)
-                cloneBlockTree(*child, function, M, map, bb_id_map, toBeReplaced);
+                cloneBlockTree(*child, function, M, map, value_pointer_map, bb_id_map, toBeReplaced);
         }
 
         void mapBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
@@ -947,7 +991,7 @@ namespace
             mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
         }
         //This function now assumes supportsEDDI(QEDMode) == true
-        void cloneFunction(Function *F, ValueDuplicateMap & global_map, std::map<BasicBlock *, int> &bb_id_map, Module &M)
+        void cloneFunction(Function *F, ValueDuplicateMap & global_map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int> &bb_id_map, Module &M)
         {
             //TODO: Can do better than this.
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME || F->getName() == ERROR_REPORTER_NAME)
@@ -963,7 +1007,7 @@ namespace
             map.insert(global_map.begin(), global_map.end());
             
             // EDDI_V!
-            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, bb_id_map, toBeReplaced);
+            cloneBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, value_pointer_map, bb_id_map, toBeReplaced);
             
             // Phi-Node handler
             FORN(i,sz(toBeReplaced))
@@ -1383,6 +1427,7 @@ namespace
         {
             currentBasicBlock = 1;
             ValueDuplicateMap map;
+            ValueBoolMap value_pointer_map;
 
             if (supportsEDDI(QEDMode))
                 cloneGlobalVariables(M, map);
@@ -1469,15 +1514,17 @@ namespace
             if (supportsEDDI(QEDMode))
             {
                 createEDDICheckFunction(M);
-                db(NUM_QED_CHECKS_DONE);
 
                 FORE(iter, M)
                     if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
                         modifyPrototype(iter,map);
+
                 // Iterate over all the functions and clone them
                 FORE(iter, M)
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                        cloneFunction(iter, map, bb_id_map, M);
+                        cloneFunction(iter, map, value_pointer_map, bb_id_map, M);
+
+                db(NUM_QED_CHECKS_DONE);
             }
 
             // Start allocating IDs to basic blocks if the user expects CFTSS
