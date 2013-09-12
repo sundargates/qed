@@ -137,15 +137,15 @@ namespace
         GlobalVariable    * last_bb_id; 
 
         Function          * EDDICheckFunction;
-        std::string EDDI_CHECK_FUNCTION_NAME;
+        STRING EDDI_CHECK_FUNCTION_NAME;
         GlobalVariable    * EDDI_error_msg;
 
         Function          * CFCSSCheckFunction;
-        std::string CFCSS_CHECK_FUNCTION_NAME;
-        std::string LOCAL_CFCSS_IDENTIFIER_STRING;
+        STRING CFCSS_CHECK_FUNCTION_NAME;
+        STRING LOCAL_CFCSS_IDENTIFIER_STRING;
 
         Function          * ErrorReportingFn;
-        std::string ERROR_REPORTER_NAME;
+        STRING ERROR_REPORTER_NAME;
         STRING RAND_FUNCTION_PREFIX;
 
         QED() : ModulePass(ID), context(getGlobalContext())
@@ -222,7 +222,7 @@ namespace
         void cloneGlobal(GlobalVariable * global, Module &M, ValueDuplicateMap & map)
         {
             // db(global->getName());
-            std::string name = makeName(global, "_dup");
+            STRING name = makeName(global, "_dup");
             PointerType * type = global->getType();
             GlobalVariable *global_dup = new GlobalVariable
             (
@@ -383,16 +383,6 @@ namespace
             // errs()<<"The above operand does not have a replacement?\n";
             return mp(value, false);
         }
-        bool isHeapCall(Function* F)
-        {
-            return F->getName().equals(StringRef("malloc")) ||
-                   F->getName().equals(StringRef("calloc")) ||
-                   F->getName().equals(StringRef("realloc")) ||
-                   //I thought that would be sufficient, but...
-                   //You may also need pvalloc, cfree, memalign, posix_memalign
-                   F->getName().equals(StringRef("valloc")) ||
-                   F->getName().equals(StringRef("free"));
-        }
         bool isCloneable(Instruction *inst)
         {
             bool success = true;
@@ -404,6 +394,7 @@ namespace
 
             if(inst->hasName() && inst->getName().find("_QED_CHECK_")!=std::string::npos)
                 success &= false;
+
             return success;
         }
         bool isPhi(Instruction *inst)
@@ -574,19 +565,6 @@ namespace
 
                     assert(!input1->getType()->isPointerTy() && "Pointers shouldn't be compared");
                     assert(!input2->getType()->isPointerTy() && "Pointers shouldn't be compared");
-                    // errs() <<"\n\n";
-                    // input1->getType()->dump();errs()<<"\t";
-                    // input2->getType()->dump();
-                    // if(input1->getType()->isVectorTy())
-                    // {
-                    //     assert(input1->getType()->getVectorElementType()==i1);
-                    //     // Value *temp = createReduction()
-                    // }
-                    // if(input2->getType()->isVectorTy())
-                    // {
-                    //     assert(input1->getType()->getVectorElementType()==i1);
-                    //     assert(false);
-                    // }
                     return BinaryOperator::Create(op, input1, input2, name, insertBefore);
             }
         }
@@ -871,12 +849,11 @@ namespace
             return res;
         }
         bool hasReturnInstruction(BasicBlock *bb)
-        {
-            return true;
-            // ReturnInst * ret = dyn_cast<ReturnInst>(bb->getTerminator());
-            // if(ret)
-            //     return true;
-            // return false;
+        {            
+            ReturnInst * ret = dyn_cast<ReturnInst>(bb->getTerminator());
+            if(ret)
+                return true;
+            return false;
         }
         BasicBlock *getFirstCaller(Function *F)
         {
