@@ -66,6 +66,9 @@ typedef std::string STRING;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
 #define NUM_AVAIL_MODES 4
+
+#define _LOCAL_CFCSS_ONLY_
+
 enum QEDLevel
 {
     EDDI        = 0x1,
@@ -849,7 +852,7 @@ namespace
             return res;
         }
         bool hasReturnInstruction(BasicBlock *bb)
-        {            
+        {
             ReturnInst * ret = dyn_cast<ReturnInst>(bb->getTerminator());
             if(ret)
                 return true;
@@ -879,6 +882,9 @@ namespace
             }
             return res>1;
         }
+
+#if !defined(_LOCAL_CFCSS_ONLY_)
+
         void controlFlowCheckBasicBlock(BasicBlock *bb, std::map<BasicBlock *, int> &bb_id_map)
         {
             Instruction *I = bb->getFirstInsertionPt();
@@ -959,6 +965,71 @@ namespace
             }
             new StoreInst (computed_value, global_cfcss_id, I);
         }
+
+#else
+
+        void controlFlowCheckBasicBlock(BasicBlock *bb, Value *local_cfcss_id, std::map<BasicBlock *, int> &bb_id_map)
+        {
+            if(isEntryBlock(bb))
+            {
+                Value *tobestoredval   = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+
+                BasicBlock::iterator I = bb->begin();
+                while (isPhi(I) || I==local_cfcss_id) ++I;
+
+                new StoreInst (tobestoredval, local_cfcss_id, I);
+                return;
+            }
+
+
+            Instruction *I = bb->getFirstInsertionPt();
+            PHINode *D;
+            // Not the entry block
+            // Insert a PhiNode to compensate for a fan-in node
+            if(!bb->getUniquePredecessor())
+            {
+                //D(i,m)   = S(i,m) ^ S(i,1)
+                int S1     = get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+                D = PHINode::Create(i32, 0, "D-PhiNode", bb->getFirstInsertionPt());
+
+                for (pred_iterator PI = pred_begin(bb), E = pred_end(bb); PI != E; ++PI) 
+                {
+                    BasicBlock *Pred = *PI;
+                    // S(i,m)
+                    int S            = get_value_from_map(Pred, bb_id_map);
+                    Value *S_val     = ConstantInt::get(i32, S^S1, false);
+                    D->addIncoming(S_val, Pred);
+                }
+            }
+
+            Value *signature                  = ConstantInt::get(i32, get_value_from_map(bb, bb_id_map), false);
+            int val                           = get_value_from_map(bb, bb_id_map) ^ get_value_from_map(getFirstPredecessor(bb), bb_id_map);
+            Value *dj                         = ConstantInt::get(i32, val, false);;
+
+
+            // G                              = G ^ dj
+            Instruction *loaded_last_cfcss_id = new LoadInst(local_cfcss_id, makeName(bb, "_load_G"), I);
+            Instruction *computed_value       = BinaryOperator::Create(Instruction::Xor, loaded_last_cfcss_id, dj, "GxorDiff", I);
+
+            if(!bb->getUniquePredecessor())
+                computed_value = BinaryOperator::Create(Instruction::Xor, computed_value, D, "GxorD", I);
+
+            if(hasReturnInstruction(bb))
+            {
+                // br (G != Sj)
+                Value *compare_instruction = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_EQ, computed_value, signature, makeName(bb, "_cfcss_check"), I);
+                std::vector<Value *> args;
+                args.pb(compare_instruction);
+                
+                CallInst::Create(CFCSSCheckFunction, args, "", I);
+            }
+            new StoreInst (computed_value, local_cfcss_id, I);
+        }
+
+#endif
+
+#if !defined(_LOCAL_CFCSS_ONLY_)
+
         void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, std::map<BasicBlock *, int> bb_id_map)
         {
             assert(supportsCFCSS(QEDMode) && "This mode shouldn't use CFCSS");
@@ -967,6 +1038,20 @@ namespace
             for each(child, *root)
                 controlFlowCheckBlockTree(*child, bb_id_map);
         }
+
+#else
+
+        void controlFlowCheckBlockTree(DomTreeNodeBase<BasicBlock> * root, Value *local_cfcss_id, std::map<BasicBlock *, int> bb_id_map)
+        {
+            assert(supportsCFCSS(QEDMode) && "This mode shouldn't use CFCSS");
+            controlFlowCheckBasicBlock(root->getBlock(), local_cfcss_id, bb_id_map);
+
+            for each(child, *root)
+                controlFlowCheckBlockTree(*child, local_cfcss_id, bb_id_map);
+        }
+
+#endif        
+
         void printName(Value *v)
         {
             errs()<<v->getName()<<"\n";
@@ -1514,6 +1599,32 @@ namespace
                 db(NUM_QED_CHECKS_DONE);
             }
 
+            if (supportsCFCSS(QEDMode))
+            {
+                FORE(iter, M)
+                {
+                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    {
+                        Function *F                    = iter;
+                        DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
+
+#if !defined(_LOCAL_CFCSS_ONLY_)
+
+                        controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
+                        insertStoresBeforeCalls (F, bb_id_map);
+                        insertStoresBeforeExits (F, bb_id_map);
+                        insertChecksAfterCalls  (F, bb_id_map);
+
+#else
+
+                        BasicBlock &entry           = F->getEntryBlock();
+                        Instruction *local_cfcss_id = new AllocaInst (Type::getInt32Ty(context), 0, LOCAL_CFCSS_IDENTIFIER_STRING, entry.getFirstInsertionPt());
+                        controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), local_cfcss_id, bb_id_map);
+#endif                        
+                    }
+                }
+            }
+
             // Start allocating IDs to basic blocks if the user expects CFTSS
             if (supportsCFTSS(QEDMode))
             {
@@ -1523,23 +1634,6 @@ namespace
                     {
                         DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*iter);
                         trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
-                    }
-                }
-            }
-
-            if (supportsCFCSS(QEDMode))
-            {
-                FORE(iter, M)
-                {
-                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
-                    {
-                        Function *F = iter;
-                        DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
-                        controlFlowCheckBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
-
-                        insertStoresBeforeCalls (F, bb_id_map);
-                        insertStoresBeforeExits (F, bb_id_map);
-                        insertChecksAfterCalls  (F, bb_id_map);
                     }
                 }
             }
