@@ -62,6 +62,7 @@ typedef std::vector<int> vi;
 typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
 typedef std::map<Value *, bool> ValueBoolMap;
+typedef std::string STRING;
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
 #define NUM_AVAIL_MODES 4
@@ -145,6 +146,7 @@ namespace
 
         Function          * ErrorReportingFn;
         std::string ERROR_REPORTER_NAME;
+        STRING RAND_FUNCTION_PREFIX;
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
@@ -161,6 +163,7 @@ namespace
             CFCSS_CHECK_FUNCTION_NAME     = "cfcss_check_function";
             ERROR_REPORTER_NAME           = "error_detected";
             LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
+            RAND_FUNCTION_PREFIX          = "rand";
 
             NUM_QED_CHECKS_DONE           = 0;
 
@@ -397,11 +400,7 @@ namespace
 
             CallInst *call = dyn_cast<CallInst>(inst);
             Function *F = call?call->getCalledFunction():NULL;
-            success &= !call 
-                    || (call && (call->isInlineAsm()))
-                    || (call && F && isHeapCall(F))
-                    || (call && F && (F->isIntrinsic()))
-                    ;
+            success &= !(call && F && (F->getName().find(RAND_FUNCTION_PREFIX) != std::string::npos));
 
             if(inst->hasName() && inst->getName().find("_QED_CHECK_")!=std::string::npos)
                 success &= false;
@@ -494,8 +493,8 @@ namespace
                 call->setDoesNotThrow();
                 return call;
         }
-//         Duplicate all call instruction parameters, demux the return value
-//         Depends on muxFunction being called on all functions to produce the function type map
+        // Duplicate all call instruction parameters, demux the return value
+        // Depends on muxFunction being called on all functions to produce the function type map
         void modifyCallInstruction(CallInst *call, ValueDuplicateMap & map, std::vector<CallInst *> & toBeRemoved)
         {
             std::vector<Value *> args;
@@ -729,6 +728,17 @@ namespace
                     if(needsToBeChecked(I, value_pointer_map))
                             previous = true;
                 }
+
+#if defined(_DEBUG_)
+
+                else
+                if (isa<CallInst>(iter))
+                {
+                    I = iter;
+                    I->dump();
+                }
+
+#endif                
             }
             FORN(i, sz(toBeRemoved))
             {
