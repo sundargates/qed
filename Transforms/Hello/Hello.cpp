@@ -125,7 +125,7 @@ namespace
         ConstantInt       * i1_false;
         ConstantInt       * i32_zero;
         int currentBasicBlock;
-        int NUM_QED_CHECKS_DONE;
+        int NUM_EDDI_CHECKS_DONE;
         // int NUM_ELEMENTS_IN_CFTSS_ARRAY;
 
 
@@ -168,7 +168,7 @@ namespace
             LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
             RAND_FUNCTION_PREFIX          = "rand";
 
-            NUM_QED_CHECKS_DONE           = 0;
+            NUM_EDDI_CHECKS_DONE           = 0;
 
             assert ( (QEDMode<(1<<NUM_AVAIL_MODES)) && "QED Mode cannot be greater than 15. Each bit represents one \
                 option and there are only five options to choose.");
@@ -208,11 +208,10 @@ namespace
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
-            // db(F->getName());
             return  F!=NULL
                     && (!F->getBasicBlockList().empty() && F->size())
                     && F->getName().compare("main") 
-                    && (F->getName().find("entry_point")==StringRef::npos)
+                    // && (F->getName().find("entry_point")==StringRef::npos)
                     && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
                     && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME)
                     && F->getName().compare(ERROR_REPORTER_NAME);
@@ -453,12 +452,12 @@ namespace
                 I->getOperand(i)->dump();
             }
         }
-        CmpInst * createCheckInst(Value * a, Value * b, const Twine & name, Instruction * insertBefore)
+        CmpInst * createCheckInst(Value * a, Value * b, const Twine & name)
         {
             bool float_type = a->getType()->isFPOrFPVectorTy();
             CmpInst::OtherOps op = float_type ? Instruction::FCmp : Instruction::ICmp;
             CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_OEQ : CmpInst::ICMP_EQ;
-            CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name, insertBefore);
+            CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name);
             return cmp;
         }
         bool hasOutput(Instruction *I)
@@ -498,18 +497,21 @@ namespace
                 args.push_back(arg);
                 args.push_back(mapValue(arg, map).first);
             }
-            Function * function = call->getCalledFunction();
-            CallInst * new_call = CallInst::Create(function, args, "", call);
+            Function * function    = call->getCalledFunction();
+            CallInst * new_call    = CallInst::Create(function, args, "", call);
+
             // new_call->setAttributes(call->getAttributes());
 
             Type * result_type = call->getType();
             if (!result_type->isVoidTy())
             {
-                Value *result =  ExtractValueInst::Create (new_call, 0, "", call);
-                Value *result_dup =  ExtractValueInst::Create (new_call, 1, "", call);
+                Value *result     = ExtractValueInst::Create (new_call, 0, "", call);
+                Value *result_dup = ExtractValueInst::Create (new_call, 1, "", call);
                 call->replaceAllUsesWith(result);
-                map[result] = result_dup;
+                map[result]       = result_dup;
             }
+
+            map[call] = new_call;
             toBeRemoved.pb(call);
         }
         void muxReturnInst(ReturnInst * ret, ValueDuplicateMap & map)
@@ -658,56 +660,90 @@ namespace
         const char * getQEDCheckSuffix()
         {
             std::string temp = "_QED_CHECK_";
-            return (temp + getString(NUM_QED_CHECKS_DONE)).c_str();
+            return (temp + getString(NUM_EDDI_CHECKS_DONE)).c_str();
         }
-        void cloneBasicBlock(BasicBlock *bb, Function *F, Module *M, ValueDuplicateMap & map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int>& bb_id_map, 
-            std::vector< std::pair<Instruction *, Value *> > &toBeReplaced)
+        void cloneBasicBlock (
+                BasicBlock *bb, 
+                Function *F, 
+                Module *M, 
+                ValueDuplicateMap & map, 
+                ValueBoolMap & value_pointer_map, 
+                std::map<BasicBlock *, int>& bb_id_map, 
+                std::vector< std::pair<Instruction *, Value *> > &toBeReplaced
+            )
         {
             // db(bb->getName());
-            std::string bbname = bb->getName();
+
             Instruction *I; Instruction *NI;
             std::vector<CallInst *> toBeRemoved;
             std::vector<Value *> createdCheckInsts;
-            bool previous = false;
-            int skip = 0;
+            std::vector< std::vector<Value *> > BlocksOfDuplicatedInstructions;
+
+            // bool previous = false;
+            // int skip = 0;
+
+            std::vector<Value *> BlockOfDuplicatedInstructions;
+
             FORE(iter, (*bb))
             {
-                // iter->dump();
-                if(skip)
-                {
-                    skip --;
-                    continue;
-                }
-                if(previous)
-                {
-                    Instruction *Previous = isPhi((Instruction *)iter)? (Instruction *)bb->getFirstInsertionPt() : (Instruction *)iter;
-                    CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()), Previous);
 
-                    NUM_QED_CHECKS_DONE ++;
-                    
-                    createdCheckInsts.pb(cmp);
-                    previous = false;
-                }
+                // iter->dump();
+                // if(skip)
+                // {
+                //     skip --;
+                //     continue;
+                // }
+                // if(previous)
+                // {
+                // }
+
                 CallInst *call = dyn_cast<CallInst>(iter);
                 if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
                 {
+                    // Push the current Block of instructions because it is very clear that they would be needed
+                    // before the current Call Instruction
+                    // once pushed, clear the block.
+                    BlocksOfDuplicatedInstructions.pb(BlockOfDuplicatedInstructions);
+                    BlockOfDuplicatedInstructions.clear();
+
                     modifyCallInstruction(call, map, toBeRemoved);
                 }
                 else
                 if(isCloneable(iter))
                 {
                     // iter->dump();
-                    I = iter;
-                    NI = I->clone();
-                    mapOperands(NI, map, toBeReplaced);
-                    map[I] = NI;
-                    if(I->hasName())
-                        NI->setName(makeName(I, "_dup"));
-                    NI->insertAfter(I);
-                    skip++;
 
+                    // Duplicate the Instruction
+                    {
+                        I = iter;
+                        NI = I->clone();
+                        mapOperands(NI, map, toBeReplaced);
+                        map[I] = NI;
+                        if(I->hasName())
+                            NI->setName(makeName(I, "_dup"));
+
+                    }
+
+                    // Insert the duplicated instruction into the Vector
+                    {
+                        BlockOfDuplicatedInstructions.pb(NI);
+                    }
+
+                    // NI->insertAfter(I);
+                    // skip++;
+
+                    // Create the check instruction if the output needs to be checked
+                    // Push the created check instruction into the CreatedCheckInstructions Vector
                     if(needsToBeChecked(I, value_pointer_map))
-                            previous = true;
+                    {
+                        // Instruction *Previous = isPhi((Instruction *)iter)? (Instruction *)bb->getFirstInsertionPt() : (Instruction *)iter;
+                        CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()));
+
+                        NUM_EDDI_CHECKS_DONE ++;
+                        
+                        createdCheckInsts.pb(cmp);
+                        // previous = false;
+                    }
                 }
 
 #if defined(_DEBUG_)
@@ -721,13 +757,64 @@ namespace
 
 #endif                
             }
+
+
+            BlocksOfDuplicatedInstructions.pb(BlockOfDuplicatedInstructions);
+
+            assert(sz(toBeRemoved) + 1 == sz(BlocksOfDuplicatedInstructions));
+
+
+            FORN(i, sz(toBeRemoved))
+            {
+                CallInst *call = toBeRemoved[i];
+                CallInst *new_call = dyn_cast<CallInst>(map[call]);
+
+                assert(new_call!=NULL && "call instruction should have already been mapped");
+
+                if (sz(BlocksOfDuplicatedInstructions[i]))
+                {
+                    std::vector<Value *> TempBlock = BlocksOfDuplicatedInstructions[i];
+                    FORN(j, sz(TempBlock))
+                    {
+                        Instruction * TempInstruction = dyn_cast<Instruction>(TempBlock[j]);
+
+                        if(isPhi(TempInstruction))
+                            TempInstruction->insertBefore(bb->getFirstInsertionPt());
+                        else
+                            TempInstruction->insertBefore(new_call);
+                    }
+                }
+            }
+
+            if (sz(BlocksOfDuplicatedInstructions[sz(BlocksOfDuplicatedInstructions) - 1]))
+            {
+                std::vector<Value *> TempBlock = BlocksOfDuplicatedInstructions[sz(BlocksOfDuplicatedInstructions) - 1];
+                FORN(i, sz(TempBlock))
+                {
+                    Instruction * TempInstruction = dyn_cast<Instruction>(TempBlock[i]);
+
+                    if(isPhi(TempInstruction))
+                        TempInstruction->insertBefore(bb->getFirstInsertionPt());
+                    else
+                        TempInstruction->insertBefore(bb->getTerminator());
+                }
+            }
+
             FORN(i, sz(toBeRemoved))
             {
                 CallInst *temp = toBeRemoved[i];
                 temp->eraseFromParent();
             }
+            
             if(sz(createdCheckInsts))
             {
+
+                FORN(i, sz(createdCheckInsts))
+                {
+                    Instruction *I = dyn_cast<Instruction>(createdCheckInsts[i]);
+                    I->insertBefore(bb->getTerminator());
+                }
+
                 Value * error = createReduction(Instruction::And, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
                 CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
@@ -1596,7 +1683,7 @@ namespace
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                         cloneFunction(iter, map, value_pointer_map, bb_id_map, M);
 
-                db(NUM_QED_CHECKS_DONE);
+                db(NUM_EDDI_CHECKS_DONE);
             }
 
             if (supportsCFCSS(QEDMode))
