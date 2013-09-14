@@ -63,6 +63,7 @@ typedef std::pair<int,int> ii;
 typedef ValueToValueMapTy ValueDuplicateMap;
 typedef std::map<Value *, bool> ValueBoolMap;
 typedef std::string STRING;
+
 #define each_custom(item, set, begin, end) (__typeof((set).begin()) item = (set).begin(), __end = (set).end(); item != __end; ++item)
 #define each(item, set) each_custom(item, set, begin, end)
 #define NUM_AVAIL_MODES 4
@@ -455,6 +456,12 @@ namespace
         CmpInst * createCheckInst(Value * a, Value * b, const Twine & name)
         {
             bool float_type = a->getType()->isFPOrFPVectorTy();
+
+            // {
+            //     a->dump();
+            //     b->dump();
+            // }
+
             CmpInst::OtherOps op = float_type ? Instruction::FCmp : Instruction::ICmp;
             CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_OEQ : CmpInst::ICMP_EQ;
             CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name);
@@ -614,6 +621,9 @@ namespace
             if (dyn_cast<PtrToIntInst>(V))
                 return true;
 
+            if (dyn_cast<IntToPtrInst>(V))
+                return true;
+
             if(map.find(V)!=map.end())
                 return map[V];
 
@@ -626,6 +636,10 @@ namespace
                 for each_custom(operand, *I, op_begin, op_end)
                     success |= isPointer(*operand, map);
             }
+            for each_custom(iter, *V, use_begin, use_end)
+            {
+                success |= isPointer(*iter, map);
+            }
 
             return success;
         }
@@ -635,16 +649,22 @@ namespace
             if(!hasOutput(I))
                 return false;
 
-            if(I->getType()->isPointerTy())
-                return false;
+            // if(I->getType()->isPointerTy())
+            //     return false;
 
-            if(I->getType()->isVectorTy())
-                return false;
+            // if(I->getType()->isVectorTy())
+            //     return false;
 
             if(isPointer(I, value_pointer_map))
                 return false;
 
-            return true;
+            if (I->getType()->isIntegerTy())
+                return true;
+
+            if (I->getType()->isFloatingPointTy())
+                return true;
+
+            return false;
 
         }
         std::string getString(int a)
