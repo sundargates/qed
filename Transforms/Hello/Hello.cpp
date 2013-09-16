@@ -212,6 +212,8 @@ namespace
             return  F!=NULL
                     && (!F->getBasicBlockList().empty() && F->size())
                     && F->getName().compare("main") 
+                    && F->getName().compare("SignalInterrupt")
+                    && F->getName().compare("ReadParse")
                     // && (F->getName().find("entry_point")==StringRef::npos)
                     && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
                     && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME)
@@ -386,17 +388,56 @@ namespace
             // errs()<<"The above operand does not have a replacement?\n";
             return mp(value, false);
         }
-        bool isCloneable(Instruction *inst)
+        bool isCloneable(Instruction *inst, ValueDuplicateMap &map)
         {
             bool success = true;
             success &= !isa<TerminatorInst>(inst);
 
             CallInst *call = dyn_cast<CallInst>(inst);
             Function *F = call?call->getCalledFunction():NULL;
+
             success &= !(call && F && (F->getName().find(RAND_FUNCTION_PREFIX) != std::string::npos));
+
+            success &= !(call && F && (F->getName().find("getopt") != std::string::npos));
+
+            success &= !(call && F && (F->getName().find("pthread") != std::string::npos));
+
+            if(call && F && F->getName().find("gettimeofday") != std::string::npos) {
+
+                for each_custom(operand, *inst, op_begin, op_end) {
+                    
+                    // Remap the operands for gettimeofday function
+                    if(map[*operand] != *operand) {
+                        map[*operand] = *operand;
+                    }
+
+                }
+
+                success &= false;
+
+            }
+
+            // if(call && F && !prototypeNeedsToBeModified(F)) {
+
+            //     bool res = false;
+            //     for each_custom(operand, *inst, op_begin, op_end) {
+                    
+            //         // if a duplicate argument exists, then that means this function can be cloned.
+            //         // false otherwise
+            //         if(map.lookup(*operand)) {
+            //             res = true;
+            //         }
+
+            //     }
+
+            //     success &= res;
+
+            // }
+
 
             if(inst->hasName() && inst->getName().find("_QED_CHECK_")!=std::string::npos)
                 success &= false;
+
 
             return success;
         }
@@ -729,7 +770,7 @@ namespace
                     modifyCallInstruction(call, map, toBeRemoved);
                 }
                 else
-                if(isCloneable(iter))
+                if(isCloneable(iter, map))
                 {
                     // iter->dump();
 
@@ -1476,6 +1517,10 @@ namespace
                 return false;
             if(F->getName() == ERROR_REPORTER_NAME)
                 return false;
+
+            if (F->getName() == "ReadParse")
+                return false;
+            
             return true;
         }
  
