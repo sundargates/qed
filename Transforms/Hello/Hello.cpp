@@ -163,33 +163,20 @@ namespace
             i1_true                       = ConstantInt::get(i1, true);
             i1_false                      = ConstantInt::get(i1, false);
             i32_zero                      = ConstantInt::get(i32, 0);
+
             EDDI_CHECK_FUNCTION_NAME      = "eddi_check_function";
             CFCSS_CHECK_FUNCTION_NAME     = "cfcss_check_function";
             ERROR_REPORTER_NAME           = "error_detected";
             LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
             RAND_FUNCTION_PREFIX          = "rand";
 
-            NUM_EDDI_CHECKS_DONE           = 0;
+            EDDICheckFunction             = NULL;
+            CFCSSCheckFunction            = NULL;
 
-            assert ( (QEDMode<(1<<NUM_AVAIL_MODES)) && "QED Mode cannot be greater than 15. Each bit represents one \
-                option and there are only five options to choose.");
+            NUM_EDDI_CHECKS_DONE          = 0;
 
-            // errs()<<"\n";
-            // if(supportsEDDI(QEDMode))
-            //     errs()<<"EDDI\n";
-
-            // if(supportsCFTSS(QEDMode))
-            //     errs()<<"CFTSS\n";
-
-            // if(supportsCFCSS(QEDMode))
-            //     errs()<<"CFCSS\n";
-
-            // if(supportsGlobalCFCSS(QEDMode))
-            //     errs()<<"GlobalCFCSS\n";
-
-            // db(NUM_CFTSS_BB);
-            // NUM_ELEMENTS_IN_CFTSS_ARRAY = NUM_CFTSS_BB;
-            // db(NUM_ELEMENTS_IN_CFTSS_ARRAY);
+            assert ( (QEDMode<(1<<NUM_AVAIL_MODES)) && 
+                "QED Mode cannot be greater than 15. Each bit represents one option and there are only five options to choose.");
         }
         bool supportsEDDI(int QEDMode)
         {
@@ -218,6 +205,17 @@ namespace
                     && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
                     && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME)
                     && F->getName().compare(ERROR_REPORTER_NAME);
+        }
+
+        void inlineCheckFunctions () 
+        {
+
+            if (EDDICheckFunction)
+                EDDICheckFunction->addFnAttr(Attribute::AlwaysInline);
+
+            if (CFCSSCheckFunction)
+                CFCSSCheckFunction->addFnAttr(Attribute::AlwaysInline);
+
         }
         unsigned bitWidth(Type * type)
         {
@@ -1647,6 +1645,7 @@ namespace
                 new StoreInst(computed_value, global_cfcss_id, I);
             }
         }
+
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -1790,6 +1789,7 @@ namespace
                 }
             }
 
+            inlineCheckFunctions ();
             return true;
         }
         void getAnalysisUsage(AnalysisUsage & info) const
