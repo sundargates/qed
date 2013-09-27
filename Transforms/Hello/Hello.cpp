@@ -152,6 +152,8 @@ namespace
         STRING ERROR_REPORTER_NAME;
         STRING RAND_FUNCTION_PREFIX;
 
+        std::set<STRING> clonedFunctions;
+
         QED() : ModulePass(ID), context(getGlobalContext())
         {
             i1                            = Type::getInt1Ty(context);
@@ -400,6 +402,12 @@ namespace
 
             success &= !(call && F && (F->getName().find("pthread") != std::string::npos));
 
+            success &= !(call && F && (F->getName().find("print") != std::string::npos));
+
+            success &= !(call && F && (F->getName().find("putc") != std::string::npos));
+
+            success &= !(call && F && (F->getName().find("puts") != std::string::npos));
+
             if(call && F && F->getName().find("gettimeofday") != std::string::npos) {
 
                 for each_custom(operand, *inst, op_begin, op_end) {
@@ -495,12 +503,6 @@ namespace
         CmpInst * createCheckInst(Value * a, Value * b, const Twine & name)
         {
             bool float_type = a->getType()->isFPOrFPVectorTy();
-
-            // {
-            //     a->dump();
-            //     b->dump();
-            // }
-
             CmpInst::OtherOps op = float_type ? Instruction::FCmp : Instruction::ICmp;
             CmpInst::Predicate predicate = float_type ? CmpInst::FCMP_OEQ : CmpInst::ICMP_EQ;
             CmpInst * cmp = CmpInst::Create(op, predicate, a, b, name);
@@ -770,7 +772,9 @@ namespace
                 else
                 if(isCloneable(iter, map))
                 {
-                    // iter->dump();
+                    
+                    if (call && call->getCalledFunction()) 
+                        clonedFunctions.insert(call->getCalledFunction()->getName());
 
                     // Duplicate the Instruction
                     {
@@ -1646,6 +1650,24 @@ namespace
             }
         }
 
+        void printMyAnalysis() {
+
+            if (supportsEDDI(QEDMode)) {
+
+                errs () << "\n";
+                errs () << "EDDI Analysis" << "\n";
+                errs () << "Number of EDDI Checks Done = " << NUM_EDDI_CHECKS_DONE << "\n";
+
+                FORE(iter, clonedFunctions)
+                    errs () << "Function Name = " << *iter << "\n";
+
+                errs () << "\n";
+
+            }
+
+        }
+
+
         bool runOnModule(Module &M)
         {
             currentBasicBlock = 1;
@@ -1747,7 +1769,6 @@ namespace
                     if (!((*iter).isDeclaration()) && canCloneFunction(iter))
                         cloneFunction(iter, map, value_pointer_map, bb_id_map, M);
 
-                db(NUM_EDDI_CHECKS_DONE);
             }
 
             if (supportsCFCSS(QEDMode))
@@ -1790,6 +1811,8 @@ namespace
             }
 
             inlineCheckFunctions ();
+
+            printMyAnalysis();
             return true;
         }
         void getAnalysisUsage(AnalysisUsage & info) const
