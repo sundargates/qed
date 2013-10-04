@@ -153,6 +153,8 @@ namespace
         STRING RAND_FUNCTION_PREFIX;
 
         std::set<STRING> clonedFunctions;
+        std::vector<STRING> FunctionsThatShouldNotBeModified;
+        std::vector<STRING> FunctionsThatShouldNotBeCloned;
 
         QED() : ModulePass(ID), context(getGlobalContext())
         {
@@ -171,6 +173,20 @@ namespace
             ERROR_REPORTER_NAME           = "error_detected";
             LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
             RAND_FUNCTION_PREFIX          = "rand";
+
+            FunctionsThatShouldNotBeModified.pb("main");
+            FunctionsThatShouldNotBeModified.pb(EDDI_CHECK_FUNCTION_NAME);
+            FunctionsThatShouldNotBeModified.pb(CFCSS_CHECK_FUNCTION_NAME);
+            FunctionsThatShouldNotBeModified.pb(ERROR_REPORTER_NAME);
+
+
+            FunctionsThatShouldNotBeCloned.pb("getopt");
+            FunctionsThatShouldNotBeCloned.pb("pthread_create");
+            FunctionsThatShouldNotBeCloned.pb("printf");
+            FunctionsThatShouldNotBeCloned.pb("putc");
+            FunctionsThatShouldNotBeCloned.pb("puts");
+            FunctionsThatShouldNotBeCloned.pb("putchar");
+
 
             EDDICheckFunction             = NULL;
             CFCSSCheckFunction            = NULL;
@@ -200,13 +216,20 @@ namespace
         {
             return  F!=NULL
                     && (!F->getBasicBlockList().empty() && F->size())
-                    && F->getName().compare("main") 
-                    && F->getName().compare("SignalInterrupt")
-                    && F->getName().compare("ReadParse")
+                    && find(
+                            FunctionsThatShouldNotBeModified.begin(), 
+                            FunctionsThatShouldNotBeModified.end(), 
+                            F->getName()
+                            ) == FunctionsThatShouldNotBeModified.end()
+                    ;
+
+                    // && F->getName().compare("SignalInterrupt")
+                    // && F->getName().compare("ReadParse")
+                    // && F->getName().compare(MAIN_FUNCTION_NAME)
                     // && (F->getName().find("entry_point")==StringRef::npos)
-                    && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
-                    && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME)
-                    && F->getName().compare(ERROR_REPORTER_NAME);
+                    // && F->getName().compare(EDDI_CHECK_FUNCTION_NAME)
+                    // && F->getName().compare(CFCSS_CHECK_FUNCTION_NAME)
+                    // && F->getName().compare(ERROR_REPORTER_NAME);
         }
 
         void inlineCheckFunctions () 
@@ -396,17 +419,15 @@ namespace
             CallInst *call = dyn_cast<CallInst>(inst);
             Function *F = call?call->getCalledFunction():NULL;
 
-            success &= !(call && F && (F->getName().find(RAND_FUNCTION_PREFIX) != std::string::npos));
+            if (call && F) {
 
-            success &= !(call && F && (F->getName().find("getopt") != std::string::npos));
+                success &= find(
+                                FunctionsThatShouldNotBeCloned.begin(), 
+                                FunctionsThatShouldNotBeCloned.end(),
+                                F->getName()
+                            ) == FunctionsThatShouldNotBeCloned.end();
 
-            success &= !(call && F && (F->getName().find("pthread") != std::string::npos));
-
-            success &= !(call && F && (F->getName().find("print") != std::string::npos));
-
-            success &= !(call && F && (F->getName().find("putc") != std::string::npos));
-
-            success &= !(call && F && (F->getName().find("puts") != std::string::npos));
+            }
 
             if(call && F && F->getName().find("gettimeofday") != std::string::npos) {
 
@@ -422,6 +443,18 @@ namespace
                 success &= false;
 
             }
+
+            // success &= !(call && F && (F->getName().find(RAND_FUNCTION_PREFIX) != std::string::npos));
+
+            // success &= !(call && F && (F->getName().find("getopt") != std::string::npos));
+
+            // success &= !(call && F && (F->getName().find("pthread") != std::string::npos));
+
+            // success &= !(call && F && (F->getName().find("print") != std::string::npos));
+
+            // success &= !(call && F && (F->getName().find("putc") != std::string::npos));
+
+            // success &= !(call && F && (F->getName().find("puts") != std::string::npos));
 
             // if(call && F && !prototypeNeedsToBeModified(F)) {
 
