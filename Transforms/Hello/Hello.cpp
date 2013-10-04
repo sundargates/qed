@@ -299,15 +299,25 @@ namespace
             }
 
             Type * new_return_type = return_type;
-            if (return_type->isVoidTy())
+            if (return_type->isVoidTy()) {
+
                 new_return_type = Type::getVoidTy(context);
+
+            }
             else
-            {
+            if (return_type->isIntegerTy() || return_type->isFloatingPointTy()) {
+
+                new_return_type = return_type;
+
+            }
+            else {
+
                 std::vector<Type*> RetTypes;
                 Type *dup_return_type = return_type;
                 RetTypes.pb(return_type);
                 RetTypes.pb(dup_return_type);
                 new_return_type = StructType::get(context, RetTypes, true);
+
             }
 
             FunctionType * new_type = FunctionType::get(new_return_type, arg_types, type->isVarArg());
@@ -584,12 +594,18 @@ namespace
             // new_call->setAttributes(call->getAttributes());
 
             Type * result_type = call->getType();
-            if (!result_type->isVoidTy())
-            {
+            if (result_type->isPointerTy() || result_type->isVectorTy()) {
+
                 Value *result     = ExtractValueInst::Create (new_call, 0, "", call);
                 Value *result_dup = ExtractValueInst::Create (new_call, 1, "", call);
                 call->replaceAllUsesWith(result);
                 map[result]       = result_dup;
+
+            }
+            else {
+
+                call->replaceAllUsesWith(new_call);
+
             }
 
             map[call] = new_call;
@@ -718,8 +734,27 @@ namespace
             return success;
         }
 
+        bool isLiveValue(Instruction *I) {
+
+            if (I->isUsedOutsideOfBlock(I->getParent()))
+                return true;
+
+            for each_custom(iter, *I, use_begin, use_end) {
+                Instruction *User = dyn_cast<Instruction>(*iter);
+
+                if ( dyn_cast<ReturnInst>(User) 
+                        || dyn_cast<StoreInst>(User)
+                        || dyn_cast<LoadInst>(User)
+                    )
+                    return true;
+            }
+
+            return false;
+
+        }
         bool needsToBeChecked (Instruction *I, ValueBoolMap &value_pointer_map)
         {
+
             if(!hasOutput(I))
                 return false;
 
@@ -728,6 +763,11 @@ namespace
 
             // if(I->getType()->isVectorTy())
             //     return false;
+
+            // return true;
+
+            if(!isLiveValue(I) )
+                return false;
 
             if(isPointer(I, value_pointer_map))
                 return false;
@@ -909,6 +949,8 @@ namespace
                 {
                     Instruction *I = dyn_cast<Instruction>(createdCheckInsts[i]);
                     I->insertBefore(bb->getTerminator());
+
+                    // I->dump();
                 }
 
                 Value * error = createReduction(Instruction::And, createdCheckInsts, bb->getTerminator(), makeName(bb, "_error"));
@@ -1279,14 +1321,27 @@ namespace
             // Replace the return instructions
             // This has to be done last because you may not have replicated everything if you just replace 
             // the return instruction in cloneBasicBlock
-            if (prototypeNeedsToBeModified(F))
-            {
+            if (prototypeNeedsToBeModified(F)) {
+
+                if (F->getFunctionType()->getReturnType()->isVoidTy()) {
+
+                    return;
+
+                }
+
+                if ((F->getFunctionType()->getReturnType()->isIntegerTy() || F->getFunctionType()->getReturnType()->isFloatingPointTy())) {
+
+                    return;
+
+                }
+
                 FORE(iter, (*F))
                 {
                     ReturnInst * ret = dyn_cast<ReturnInst>(iter->getTerminator());
                     if (ret && ret->getReturnValue())
                         muxReturnInst(ret, map);
                 }
+
             }
         }
         Constant * createStringConstant(const std::string & string)
