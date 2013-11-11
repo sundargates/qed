@@ -179,6 +179,11 @@ namespace
             FunctionsThatShouldNotBeModified.pb(CFCSS_CHECK_FUNCTION_NAME);
             FunctionsThatShouldNotBeModified.pb(ERROR_REPORTER_NAME);
 
+            // Parser specific
+            FunctionsThatShouldNotBeModified.pb("analyze_thin_linkage");
+            FunctionsThatShouldNotBeModified.pb("analyze_fat_linkage");
+
+
 
             FunctionsThatShouldNotBeCloned.pb("getopt");
             FunctionsThatShouldNotBeCloned.pb("pthread_create");
@@ -186,6 +191,7 @@ namespace
             FunctionsThatShouldNotBeCloned.pb("putc");
             FunctionsThatShouldNotBeCloned.pb("puts");
             FunctionsThatShouldNotBeCloned.pb("putchar");
+            FunctionsThatShouldNotBeCloned.pb("rand");
 
 
             EDDICheckFunction             = NULL;
@@ -581,6 +587,7 @@ namespace
         // Depends on muxFunction being called on all functions to produce the function type map
         void modifyCallInstruction(CallInst *call, ValueDuplicateMap & map, std::vector<CallInst *> & toBeRemoved)
         {
+            // call->dump();
             std::vector<Value *> args;
             for (unsigned index = 0; index < call->getNumArgOperands(); index++)
             {
