@@ -270,6 +270,15 @@ namespace
                 global->getThreadLocalMode(),
                 type->getAddressSpace()
             );
+
+            std::pair<Value *, bool> res = mapValue(global->getInitializer(), map);
+            Constant *t = dyn_cast<Constant>(res.first);
+            if (t) {
+                global_dup->setInitializer(t);
+            }
+            else {
+                global->getInitializer()->dump();
+            }
             
             global_dup->copyAttributesFrom(global);
             map[global] = global_dup;
