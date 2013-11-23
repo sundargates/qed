@@ -201,6 +201,8 @@ namespace
             FunctionsThatShouldNotBeCloned.pb("strtok");
             FunctionsThatShouldNotBeCloned.pb("fflush");
             FunctionsThatShouldNotBeCloned.pb("exit");
+            FunctionsThatShouldNotBeCloned.pb("srand");
+
 
 
             EDDICheckFunction             = NULL;
