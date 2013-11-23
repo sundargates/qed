@@ -153,7 +153,7 @@ namespace
         STRING RAND_FUNCTION_PREFIX;
 
         std::set<STRING> clonedFunctions;
-        std::vector<STRING> FunctionsThatShouldNotBeModified;
+        std::set<STRING> FunctionsThatShouldNotBeModified;
         std::vector<STRING> FunctionsThatShouldNotBeCloned;
 
         QED() : ModulePass(ID), context(getGlobalContext())
@@ -174,17 +174,16 @@ namespace
             LOCAL_CFCSS_IDENTIFIER_STRING = "LOCAL_CFCSS_ID";
             RAND_FUNCTION_PREFIX          = "rand";
 
-            FunctionsThatShouldNotBeModified.pb("main");
-            FunctionsThatShouldNotBeModified.pb(EDDI_CHECK_FUNCTION_NAME);
-            FunctionsThatShouldNotBeModified.pb(CFCSS_CHECK_FUNCTION_NAME);
-            FunctionsThatShouldNotBeModified.pb(ERROR_REPORTER_NAME);
+            FunctionsThatShouldNotBeModified.insert("main");
+            FunctionsThatShouldNotBeModified.insert(EDDI_CHECK_FUNCTION_NAME);
+            FunctionsThatShouldNotBeModified.insert(CFCSS_CHECK_FUNCTION_NAME);
+            FunctionsThatShouldNotBeModified.insert(ERROR_REPORTER_NAME);
             // FunctionsThatShouldNotBeModified.pb("my_strtok");
             // FunctionsThatShouldNotBeModified.pb("countpass");
 
             // Parser specific
-            FunctionsThatShouldNotBeModified.pb("analyze_thin_linkage");
-            // FunctionsThatShouldNotBeModified.pb("spec_read");
-            FunctionsThatShouldNotBeModified.pb("analyze_fat_linkage");
+            FunctionsThatShouldNotBeModified.insert("analyze_thin_linkage");
+            FunctionsThatShouldNotBeModified.insert("analyze_fat_linkage");
 
             // gzip specific
             // FunctionsThatShouldNotBeModified.pb("zip");
@@ -200,6 +199,8 @@ namespace
             FunctionsThatShouldNotBeCloned.pb("rand");
             FunctionsThatShouldNotBeCloned.pb("scanf");
             FunctionsThatShouldNotBeCloned.pb("strtok");
+            FunctionsThatShouldNotBeCloned.pb("fflush");
+            FunctionsThatShouldNotBeCloned.pb("exit");
 
 
             EDDICheckFunction             = NULL;
@@ -276,18 +277,21 @@ namespace
                     Function *F = (iter);
                     for each_custom(use_iter, *F, use_begin, use_end) {
 
-                        // if (F->getName() == "zip")
-                        //     (*use_iter)->dump();
-
                         Instruction *User = dyn_cast<Instruction>(*use_iter);
+                        // User->dump();
                         if (User && dyn_cast<StoreInst>(User) ) {
-                            // db(F->getName());
-                            FunctionsThatShouldNotBeModified.pb(F->getName());
+                            FunctionsThatShouldNotBeModified.insert(F->getName());
                         }
 
                         if (dyn_cast<GlobalVariable>(*use_iter)) {
-                            // db(F->getName());
-                            FunctionsThatShouldNotBeModified.pb(F->getName());
+                            FunctionsThatShouldNotBeModified.insert(F->getName());
+                        }
+
+                        if (User && dyn_cast<CallInst>(User)) {
+                            CallInst *call = dyn_cast<CallInst>(User);
+                            if(call->getCalledFunction()->getName() == "signal") {
+                                FunctionsThatShouldNotBeModified.insert(F->getName());
+                            }
                         }
                     }
                 }
