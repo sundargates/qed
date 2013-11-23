@@ -178,10 +178,16 @@ namespace
             FunctionsThatShouldNotBeModified.pb(EDDI_CHECK_FUNCTION_NAME);
             FunctionsThatShouldNotBeModified.pb(CFCSS_CHECK_FUNCTION_NAME);
             FunctionsThatShouldNotBeModified.pb(ERROR_REPORTER_NAME);
+            // FunctionsThatShouldNotBeModified.pb("my_strtok");
+            // FunctionsThatShouldNotBeModified.pb("countpass");
 
             // Parser specific
             FunctionsThatShouldNotBeModified.pb("analyze_thin_linkage");
+            // FunctionsThatShouldNotBeModified.pb("spec_read");
             FunctionsThatShouldNotBeModified.pb("analyze_fat_linkage");
+
+            // gzip specific
+            // FunctionsThatShouldNotBeModified.pb("zip");
 
 
 
@@ -192,6 +198,8 @@ namespace
             FunctionsThatShouldNotBeCloned.pb("puts");
             FunctionsThatShouldNotBeCloned.pb("putchar");
             FunctionsThatShouldNotBeCloned.pb("rand");
+            FunctionsThatShouldNotBeCloned.pb("scanf");
+            FunctionsThatShouldNotBeCloned.pb("strtok");
 
 
             EDDICheckFunction             = NULL;
@@ -220,14 +228,38 @@ namespace
         }
         bool prototypeNeedsToBeModified(Function *F)
         {
-            return  F!=NULL
-                    && (!F->getBasicBlockList().empty() && F->size())
-                    && find(
-                            FunctionsThatShouldNotBeModified.begin(), 
-                            FunctionsThatShouldNotBeModified.end(), 
-                            F->getName()
-                            ) == FunctionsThatShouldNotBeModified.end()
-                    ;
+            // if (F && F->getName() == "zip") {
+            //     db(F->getName());
+            //     bool temp;
+            //     temp = (!F->getBasicBlockList().empty() && F->size());
+            //     db(F->getBasicBlockList().empty());
+            //     db(F->size());
+            //     db(temp);
+            //     temp = find(
+            //                 FunctionsThatShouldNotBeModified.begin(), 
+            //                 FunctionsThatShouldNotBeModified.end(), 
+            //                 F->getName()
+            //                 ) == FunctionsThatShouldNotBeModified.end();
+            //     db (temp); 
+            // }
+
+            if (F==NULL)
+                return false;
+
+            if (F->getBasicBlockList().empty())
+                return false;
+
+            if (functionThatShouldNotBeModified(F))
+                return false;
+
+            return true;
+                    // && (!F->getBasicBlockList().empty() && F->size())
+                    // && find(
+                    //         FunctionsThatShouldNotBeModified.begin(), 
+                    //         FunctionsThatShouldNotBeModified.end(), 
+                    //         F->getName()
+                    //         ) == FunctionsThatShouldNotBeModified.end()
+                    // ;
 
                     // && F->getName().compare("SignalInterrupt")
                     // && F->getName().compare("ReadParse")
@@ -238,6 +270,32 @@ namespace
                     // && F->getName().compare(ERROR_REPORTER_NAME);
         }
 
+        void functionsThatShouldNotBeModifiedIs(Module& M) {
+            FORE(iter, M)
+                if(!((*iter).isDeclaration())) {
+                    Function *F = (iter);
+                    for each_custom(use_iter, *F, use_begin, use_end) {
+
+                        // if (F->getName() == "zip")
+                        //     (*use_iter)->dump();
+
+                        Instruction *User = dyn_cast<Instruction>(*use_iter);
+                        if (User && dyn_cast<StoreInst>(User) ) {
+                            // db(F->getName());
+                            FunctionsThatShouldNotBeModified.pb(F->getName());
+                        }
+
+                        if (dyn_cast<GlobalVariable>(*use_iter)) {
+                            // db(F->getName());
+                            FunctionsThatShouldNotBeModified.pb(F->getName());
+                        }
+                    }
+                }
+
+            // FORE(iter, FunctionsThatShouldNotBeModified) {
+            //     db((*iter));
+            // }
+        }
         void inlineCheckFunctions () 
         {
 
@@ -258,6 +316,13 @@ namespace
             // db(global->getName());
             STRING name = makeName(global, "_dup");
             PointerType * type = global->getType();
+            // if (global->getName() == "read_buf") {
+            //     global->getType()->dump(); db("");
+            //     db(global->getType()->getTypeID());
+            //     db(global->getName());
+            //     // global->getInitializer()->dump(); db("");
+            //     // db(global->getInitializer()->getType()->getTypeID());
+            // }
             GlobalVariable *global_dup = new GlobalVariable
             (
                 M,
@@ -610,7 +675,8 @@ namespace
             // new_call->setAttributes(call->getAttributes());
 
             Type * result_type = call->getType();
-            if (result_type->isPointerTy() || result_type->isVectorTy()) {
+            // db(result_type->getTypeID());
+            if (result_type->isPointerTy() || result_type->isVectorTy() || result_type->isStructTy()) {
 
                 Value *result     = ExtractValueInst::Create (new_call, 0, "", call);
                 Value *result_dup = ExtractValueInst::Create (new_call, 1, "", call);
@@ -812,6 +878,17 @@ namespace
             std::string temp = "_QED_CHECK_";
             return (temp + getString(NUM_EDDI_CHECKS_DONE)).c_str();
         }
+        bool functionThatShouldNotBeModified(Function *F) {
+            if (!F)
+                return false;
+
+            if (find(FunctionsThatShouldNotBeModified.begin(), 
+                    FunctionsThatShouldNotBeModified.end(), 
+                    F->getName()) != FunctionsThatShouldNotBeModified.end())
+                return true;
+
+            return false;
+        }
         void cloneBasicBlock (
                 BasicBlock *bb, 
                 Function *F, 
@@ -837,17 +914,12 @@ namespace
             FORE(iter, (*bb))
             {
 
-                // iter->dump();
-                // if(skip)
-                // {
-                //     skip --;
+                CallInst *call = dyn_cast<CallInst>(iter);
+                // if (call && functionThatShouldNotBeModified(call->getCalledFunction())) {
+                //     // call->dump();
                 //     continue;
                 // }
-                // if(previous)
-                // {
-                // }
-
-                CallInst *call = dyn_cast<CallInst>(iter);
+                // else
                 if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
                 {
                     // Push the current Block of instructions because it is very clear that they would be needed
@@ -868,6 +940,7 @@ namespace
                     // Duplicate the Instruction
                     {
                         I = iter;
+                        // I->dump();
                         NI = I->clone();
                         mapOperands(NI, map, toBeReplaced);
                         map[I] = NI;
@@ -881,20 +954,15 @@ namespace
                         BlockOfDuplicatedInstructions.pb(NI);
                     }
 
-                    // NI->insertAfter(I);
-                    // skip++;
-
                     // Create the check instruction if the output needs to be checked
                     // Push the created check instruction into the CreatedCheckInstructions Vector
                     if(needsToBeChecked(I, value_pointer_map))
                     {
-                        // Instruction *Previous = isPhi((Instruction *)iter)? (Instruction *)bb->getFirstInsertionPt() : (Instruction *)iter;
                         CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()));
 
                         NUM_EDDI_CHECKS_DONE ++;
                         
                         createdCheckInsts.pb(cmp);
-                        // previous = false;
                     }
                 }
 
@@ -1862,11 +1930,15 @@ namespace
 
             if (supportsEDDI(QEDMode))
             {
+                functionsThatShouldNotBeModifiedIs(M);
+
                 createEDDICheckFunction(M);
 
-                FORE(iter, M)
+                FORE(iter, M) {
+
                     if(!((*iter).isDeclaration()) && prototypeNeedsToBeModified(iter))
                         modifyPrototype(iter,map);
+                }
 
                 // Iterate over all the functions and clone them
                 FORE(iter, M)
