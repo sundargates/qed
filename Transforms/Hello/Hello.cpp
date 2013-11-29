@@ -102,7 +102,6 @@ static cl::opt<int> QEDMode
     cl::init(EDDI),
     cl::desc("Bit 1 = EDDI, Bit 2 = CFTSS, Bit 3 = CFCSS, Bit 4 = Store number of blocks seen")
 );
-
 static cl::opt<int> NUM_ELEMENTS_IN_CFTSS_ARRAY
 (
     "NUM-CFTSS-BB",
@@ -201,6 +200,7 @@ namespace
             FunctionsThatShouldNotBeCloned.pb("strtok");
             FunctionsThatShouldNotBeCloned.pb("fflush");
             FunctionsThatShouldNotBeCloned.pb("exit");
+            FunctionsThatShouldNotBeCloned.pb("clock");
             FunctionsThatShouldNotBeCloned.pb("srand");
 
 
@@ -280,7 +280,11 @@ namespace
                     for each_custom(use_iter, *F, use_begin, use_end) {
 
                         Instruction *User = dyn_cast<Instruction>(*use_iter);
-                        // User->dump();
+
+                        if (!User) {
+                            FunctionsThatShouldNotBeModified.insert(F->getName());
+                        }
+
                         if (User && dyn_cast<StoreInst>(User) ) {
                             FunctionsThatShouldNotBeModified.insert(F->getName());
                         }
@@ -516,13 +520,12 @@ namespace
             Function *F = call?call->getCalledFunction():NULL;
 
             if (call && F) {
-
-                success &= find(
-                                FunctionsThatShouldNotBeCloned.begin(), 
-                                FunctionsThatShouldNotBeCloned.end(),
-                                F->getName()
-                            ) == FunctionsThatShouldNotBeCloned.end();
-
+                FORE(iter, FunctionsThatShouldNotBeCloned) {
+                    if (F->getName().str().find(*iter) != std::string::npos) {
+                        success = false;
+                        break;
+                    }
+                }
             }
 
             if(call && F && F->getName().find("gettimeofday") != std::string::npos) {
@@ -962,8 +965,8 @@ namespace
 
                     // Create the check instruction if the output needs to be checked
                     // Push the created check instruction into the CreatedCheckInstructions Vector
-                    if(needsToBeChecked(I, value_pointer_map))
-                    {
+                    if(needsToBeChecked(I, value_pointer_map) && canCloneFunction(F)) {
+
                         CmpInst *cmp = createCheckInst(I, NI, makeName(I, getQEDCheckSuffix()));
 
                         NUM_EDDI_CHECKS_DONE ++;
@@ -1047,6 +1050,103 @@ namespace
                 CallInst::Create(EDDICheckFunction, error, "", bb->getTerminator());
             }
         }
+        void fixBasicBlock (
+                BasicBlock *bb, 
+                Function *F, 
+                Module *M, 
+                ValueDuplicateMap & map, 
+                ValueBoolMap & value_pointer_map, 
+                std::map<BasicBlock *, int>& bb_id_map, 
+                std::vector< std::pair<Instruction *, Value *> > &toBeReplaced
+            ) {
+
+            std::vector<CallInst *> toBeRemoved;
+            std::vector<Value *> createdCheckInsts;
+            std::vector< std::vector<Value *> > BlocksOfDuplicatedInstructions;
+
+            std::vector<Value *> BlockOfDuplicatedInstructions;
+
+            FORE(iter, (*bb))
+            {
+
+                CallInst *call = dyn_cast<CallInst>(iter);
+                if (call && !call->isInlineAsm() && prototypeNeedsToBeModified(call->getCalledFunction()))
+                {
+                    // Push the current Block of instructions because it is very clear that they would be needed
+                    // before the current Call Instruction
+                    // once pushed, clear the block.
+                    BlocksOfDuplicatedInstructions.pb(BlockOfDuplicatedInstructions);
+                    BlockOfDuplicatedInstructions.clear();
+
+                    modifyCallInstruction(call, map, toBeRemoved);
+                }
+            }
+
+
+            BlocksOfDuplicatedInstructions.pb(BlockOfDuplicatedInstructions);
+
+            assert(sz(toBeRemoved) + 1 == sz(BlocksOfDuplicatedInstructions));
+
+
+            FORN(i, sz(toBeRemoved))
+            {
+                CallInst *call = toBeRemoved[i];
+                CallInst *new_call = dyn_cast<CallInst>(map[call]);
+
+                assert(new_call!=NULL && "call instruction should have already been mapped");
+
+                if (sz(BlocksOfDuplicatedInstructions[i]))
+                {
+                    std::vector<Value *> TempBlock = BlocksOfDuplicatedInstructions[i];
+                    FORN(j, sz(TempBlock))
+                    {
+                        Instruction * TempInstruction = dyn_cast<Instruction>(TempBlock[j]);
+
+                        if(isPhi(TempInstruction))
+                            TempInstruction->insertBefore(bb->getFirstInsertionPt());
+                        else
+                            TempInstruction->insertBefore(new_call);
+                    }
+                }
+            }
+
+            if (sz(BlocksOfDuplicatedInstructions[sz(BlocksOfDuplicatedInstructions) - 1]))
+            {
+                std::vector<Value *> TempBlock = BlocksOfDuplicatedInstructions[sz(BlocksOfDuplicatedInstructions) - 1];
+                FORN(i, sz(TempBlock))
+                {
+                    Instruction * TempInstruction = dyn_cast<Instruction>(TempBlock[i]);
+
+                    if(isPhi(TempInstruction))
+                        TempInstruction->insertBefore(bb->getFirstInsertionPt());
+                    else
+                        TempInstruction->insertBefore(bb->getTerminator());
+                }
+            }
+
+            FORN(i, sz(toBeRemoved))
+            {
+                CallInst *temp = toBeRemoved[i];
+                temp->eraseFromParent();
+            }
+
+        }
+
+
+        void fixBlockTree (
+                DomTreeNodeBase<BasicBlock> * root, 
+                Function * function, Module *M, 
+                ValueDuplicateMap & map, 
+                ValueBoolMap & value_pointer_map,
+                std::map<BasicBlock *, int>& bb_id_map, 
+                std::vector< std::pair<Instruction *, Value *> > &toBeReplaced
+            )
+        {
+            fixBasicBlock(root->getBlock(), function, M, map, value_pointer_map, bb_id_map, toBeReplaced);
+            for each(child, *root)
+                fixBlockTree(*child, function, M, map, value_pointer_map, bb_id_map, toBeReplaced);
+        }
+
         void cloneBlockTree (
                 DomTreeNodeBase<BasicBlock> * root, 
                 Function * function, Module *M, 
@@ -1377,15 +1477,19 @@ namespace
             DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
             mapBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
         }
+
+        void fixFunction(Function *F, ValueDuplicateMap & global_map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int> &bb_id_map, Module &M) {
+
+            std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
+            DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
+            ValueDuplicateMap map;
+            map.insert(global_map.begin(), global_map.end());
+
+            fixBlockTree(dominator_tree.getBase().getRootNode(), F, &M, map, value_pointer_map, bb_id_map, toBeReplaced);
+        }
         //This function now assumes supportsEDDI(QEDMode) == true
-        void cloneFunction(Function *F, ValueDuplicateMap & global_map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int> &bb_id_map, Module &M)
-        {
-            //TODO: Can do better than this.
-            if(F->getName() == EDDI_CHECK_FUNCTION_NAME || F->getName() == CFCSS_CHECK_FUNCTION_NAME || F->getName() == ERROR_REPORTER_NAME)
-                return;
-
-            // db(F->getName());;
-
+        void cloneFunction(Function *F, ValueDuplicateMap & global_map, ValueBoolMap & value_pointer_map, std::map<BasicBlock *, int> &bb_id_map, Module &M) {
+            
             std::vector< std::pair<Instruction *, Value *> > toBeReplaced;
             toBeReplaced.clear();
 
@@ -1689,6 +1793,17 @@ namespace
         {
             return ArrayType::get(t, N);
         }
+        bool notCheckFunction(Function *F) {
+
+            if(F->getName() == EDDI_CHECK_FUNCTION_NAME)
+                return false;
+            if(F->getName() == CFCSS_CHECK_FUNCTION_NAME)
+                return false;
+            if(F->getName() == ERROR_REPORTER_NAME)
+                return false;
+
+            return true;
+        }
         bool canCloneFunction(Function *F)
         {
             if(F->getName() == EDDI_CHECK_FUNCTION_NAME)
@@ -1699,6 +1814,9 @@ namespace
                 return false;
 
             if (F->getName() == "ReadParse")
+                return false;
+
+            if (prototypeNeedsToBeModified(F) == false)
                 return false;
             
             return true;
@@ -1925,7 +2043,7 @@ namespace
             }
             std::map<BasicBlock *, int> bb_id_map;
             FORE(iter, M)
-                if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                if (!((*iter).isDeclaration()))
                     mapFunctionBasicBlocks(iter, bb_id_map, M);
 
             if (supportsCFTSS(QEDMode))
@@ -1948,8 +2066,9 @@ namespace
 
                 // Iterate over all the functions and clone them
                 FORE(iter, M)
-                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    if (!((*iter).isDeclaration()) && notCheckFunction(iter)) {
                         cloneFunction(iter, map, value_pointer_map, bb_id_map, M);
+                    }
 
             }
 
@@ -1957,7 +2076,7 @@ namespace
             {
                 FORE(iter, M)
                 {
-                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    if (!((*iter).isDeclaration()) && notCheckFunction(iter))
                     {
                         Function *F                    = iter;
                         DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*F);
@@ -1984,7 +2103,7 @@ namespace
             {
                 FORE(iter, M)
                 {
-                    if (!((*iter).isDeclaration()) && canCloneFunction(iter))
+                    if (!((*iter).isDeclaration()) && notCheckFunction(iter))
                     {
                         DominatorTree & dominator_tree = getAnalysis<DominatorTree>(*iter);
                         trackBlockTree(dominator_tree.getBase().getRootNode(), bb_id_map);
